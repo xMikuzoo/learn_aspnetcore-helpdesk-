@@ -10,10 +10,10 @@ public static class DeleteTicketEndpoint
 
     private static async Task<Results<NoContent, NotFound>> HandleAsync(
         int id,
-        ICommandHandler<DeleteTicketCommand, bool> handler,
+        ISender sender,
         CancellationToken cancellationToken)
     {
-        var deleted = await handler.HandleAsync(new DeleteTicketCommand(id), cancellationToken);
+        var deleted = await sender.Send(new DeleteTicketCommand(id), cancellationToken);
         return deleted ? TypedResults.NoContent() : TypedResults.NotFound();
     }
 }

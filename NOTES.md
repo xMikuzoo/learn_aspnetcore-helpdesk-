@@ -20,11 +20,11 @@
 3. In-memory repo + CRUD endpoints, TypedResults, route groups.
 4. Vertical slices: folder per feature.
 5. Command vs Query: własne ICommandHandler/IQueryHandler.
-6. Dispatcher/mediator: własny → biblioteka.
-7. FluentValidation + pipeline behavior.
-8. EF Core + SQLite + migracje.
-9. Clean Architecture: warstwy, kierunek zależności, porównanie ze slices.
-10. Result pattern / ProblemDetails / obsługa błędów.
+6. Dispatcher: własny ISender (+ mapowanie nazw na MediatR w tej samej lekcji).
+7. Obsługa błędów: DomainException, katalog TicketErrors, IExceptionHandler, ProblemDetails.
+8. FluentValidation + pipeline behavior.
+9. EF Core + SQLite + migracje.
+10. Clean Architecture: warstwy, kierunek zależności, porównanie ze slices.
 11. Testy: xUnit + WebApplicationFactory.
 
 ## Log sesji
@@ -49,3 +49,8 @@
 - TODO(human) lekcji 0005 w `Features/Tickets/TicketsFeature.cs`: co ma zwracać handler operacji, która może się nie udać (bool / wyjątek / Result) — wejście do lekcji 0010.
 - 2026-09-04 (lekcja 0005, po pytaniu usera): user slusznie zakwestionowal wiersz "Query - reguly biznesowe: nie". Tabela mieszala niezmienniki z autoryzacja. Poprawione: wiersz rozbity na "niezmienniki domeny" (tylko command) i "autoryzacja" (obie strony). Dodana sekcja o IDOR, filtrowaniu u zrodla vs sprawdzaniu po fakcie, 404 vs 403, quiz q5 i recall; to samo w sciadze cqrs-handlers.
 - **ZASADA PROJEKTOWANIA LEKCJI 3**: nie upraszczac tabel porownawczych tak, ze ucza zlego odruchu w bezpieczenstwie. Lepiej dodac wiersz niz skleic dwa pojecia.
+- 2026-09-04: przenumerowana roadmapa. Nowa kolejność: 0006 dispatcher (własny ISender, bez osobnej lekcji o MediatR — mapowanie nazw jako sekcja w 0006), 0007 błędy (DomainException + katalog TicketErrors + IExceptionHandler + ProblemDetails), 0008 FluentValidation + pipeline behavior, 0009 EF Core, 0010 Clean Architecture, 0011 testy. Wszystkie odwołania w lekcjach 0001/0003/0004/0005 i w ściągach poprawione.
+- 2026-09-04: lekcja 0006 (dispatcher/ISender) napisana; nowa ściąga `reference/dispatcher-isender.html`, trzy nowe hasła w glossary (interfejs-marker, otwarty typ generyczny, service locator). Cały kod zweryfikowany na kopii projektu: markery ICommand/IQuery + `where` w handlerach, `Sender` z MakeGenericType + dynamic, sześć endpointów przepiętych na ISender, wszystkie statusy jak przed refactorem (201/200/404/204/404, metrics, diagnostics). Zacytowane dosłownie trzy błędy wywołane celowo: CS0311 (record bez markera, po polsku), `No service for type 'ICommandHandler`2[...]' has been registered` (brak AddScoped) i `Cannot resolve scoped service '...' from root provider` (Sender jako Singleton — aplikacja wstaje, wywala się przy pierwszym żądaniu).
+- 2026-09-04: **bug w repo znaleziony przy weryfikacji** — `UpdateTicketEndpoint` miał `return updated ? TypedResults.NotFound() : TypedResults.NotFound();` (regresja w working tree; commit HEAD miał poprawne NoContent). PUT dawał 404 mimo poprawnej aktualizacji. Poprawione na `NoContent()` w `project/`, niezastageowane. Wniosek: po każdej restrukturze przejść całą tabelę statusów, nie tylko sprawdzić build.
+- 2026-09-04: lekcja 0006 **bez TODO(human)** — pierwotnie oddalem userowi do napisania cialo `Sender.Dispatch` (refleksja + dynamic). Zla ocena strefy najblizszego rozwoju: user uczy sie C# od kilku lekcji, a to material z gornej polki. Caly refactor (markery, ISender, Sender, 6 recordow, 6 endpointow, AddDispatcher) napisany i zweryfikowany przeze mnie w `project/`; zadanie w lekcji to czytanie kodu, `git diff` i celowe wywolanie bledow CS0311 i 'Cannot resolve scoped service'.
+- **ZASADA PROJEKTOWANIA LEKCJI 4**: TODO(human) tylko na decyzje projektowe wyrazalne w kilku linijkach znanej juz skladni. Mechanizmy wymagajace nowej, zaawansowanej skladni (refleksja, dynamic, generyki wyzszego rzedu) pisze ja, user je czyta.

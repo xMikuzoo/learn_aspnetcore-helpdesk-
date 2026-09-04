@@ -1,3 +1,5 @@
+using Helpdesk.Common;
+
 namespace Helpdesk.Features.Tickets.Queries.ListTickets;
 
-public record ListTicketsQuery;
+public record ListTicketsQuery : IQuery<IReadOnlyList<TicketDto>>;

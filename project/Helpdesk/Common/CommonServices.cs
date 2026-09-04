@@ -9,4 +9,11 @@ public static class CommonServices
 
         return services;
     }
+
+    public static IServiceCollection AddDispatcher(this IServiceCollection services)
+    {
+        services.AddScoped<ISender, Sender>();
+
+        return services;
+    }
 }

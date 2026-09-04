@@ -105,7 +105,7 @@ tickets.MapGet(<span class="str">"/{id:int}"</span>,
   <li><strong>Sam licznik</strong> (<code>_created++</code>) wystarczy opakować w <code>Interlocked.Increment(<span class="kw">ref</span> _created)</code> — taniej niż lock.</li>
   <li>Alternatywa dla całych kolekcji: <code>System.Collections.Concurrent</code> (<code>ConcurrentDictionary</code>).</li>
 </ul>
-<p>Przy EF Core (lekcja 0008) problem znika u źródła: <code>DbContext</code> jest Scoped, więc każde żądanie ma własny i nie ma czego blokować.</p>
+<p>Przy EF Core (lekcja 0009) problem znika u źródła: <code>DbContext</code> jest Scoped, więc każde żądanie ma własny i nie ma czego blokować.</p>
 
 <nav class="lesson-nav">
   <a href="glossary.html">← Glossary</a>

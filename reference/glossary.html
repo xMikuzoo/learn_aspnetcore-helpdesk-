@@ -128,7 +128,16 @@
   <dd>Zasada: osobne ścieżki (typy, handlery, czasem modele) dla zapisu i odczytu. W prostym wydaniu = osobne klasy; w skrajnym = osobne bazy.</dd>
 
   <dt>Mediator / dispatcher</dt>
-  <dd>Obiekt, któremu endpoint oddaje command/query (<code>Send(cmd)</code>), a on znajduje właściwy handler w DI i go wywołuje. Endpoint nie zna handlera. Biblioteki: MediatR, Wolverine, Mediator — albo 30 linii własnego kodu.</dd>
+  <dd>Obiekt, któremu endpoint oddaje command/query (<code>Send(cmd)</code>), a on znajduje właściwy handler w DI i go wywołuje. Endpoint nie zna handlera. Biblioteki: MediatR, Wolverine, Mediator — albo 30 linii własnego kodu (<a href="dispatcher-isender.html">ściąga</a>, lekcja 0006).</dd>
+
+  <dt>Interfejs-marker</dt>
+  <dd>Interfejs bez składowych (<code>public interface ICommand&lt;TResult&gt;;</code>), którego jedynym zadaniem jest przenieść informację przez system typów — tutaj typ wyniku commanda, żeby <code>Send</code> mógł go wywnioskować.</dd>
+
+  <dt>Otwarty typ generyczny</dt>
+  <dd><code>typeof(ICommandHandler&lt;,&gt;)</code> — szablon z niewypełnionymi parametrami. <code>MakeGenericType(a, b)</code> wypełnia go w runtime i daje <code>Type</code>, którym można zapytać kontener.</dd>
+
+  <dt>Service locator</dt>
+  <dd>Klasa, która zamiast deklarować zależności w konstruktorze, wyciąga je z <code>IServiceProvider</code> w trakcie działania. Tak działa dispatcher — cena: walidacja kontenera w <code>Build()</code> nie widzi tych zależności, więc braki rejestracji wychodzą dopiero przy żądaniu.</dd>
 
   <dt>Pipeline behavior</dt>
   <dd>Middleware mediatora: kod uruchamiany wokół <em>każdego</em> handlera (walidacja, logowanie, transakcje). Sygnatura: dostaje request i <code>next()</code>, jak middleware w Express.</dd>
@@ -167,7 +176,7 @@
   <dd>Nazwa grupująca typy, wpisywana ręcznie w pierwszej linii pliku (<code>namespace Helpdesk.Features.Tickets;</code>). Nie wynika z folderu — konwencja, nie reguła kompilatora. <code>using</code> importuje cały namespace, nie plik.</dd>
 
   <dt>Clean Architecture <span class="pl">— architektura warstwowa</span></dt>
-  <dd>Podział po warstwach (Domain / Application / Infrastructure) z regułą „zależności wskazują do środka”. Alternatywne kryterium podziału wobec vertical slices; oba dają się łączyć. Rozwinięcie w lekcji 0009.</dd>
+  <dd>Podział po warstwach (Domain / Application / Infrastructure) z regułą „zależności wskazują do środka”. Alternatywne kryterium podziału wobec vertical slices; oba dają się łączyć. Rozwinięcie w lekcji 0010.</dd>
 </dl>
 
 <h2>CQRS i asynchroniczność</h2>

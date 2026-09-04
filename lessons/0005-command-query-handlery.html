@@ -65,8 +65,8 @@
 <p>Cztery rzeczy w tych sześciu linijkach:</p>
 <ul>
   <li><strong><code>&lt;TCommand, TResult&gt;</code> — generyki.</strong> Jak <code>Ref&lt;T&gt;</code> w Vue: klasa parametryzowana typem. Zapis <code>ICommandHandler&lt;CreateTicketCommand, Ticket&gt;</code> czyta się „handler, który przyjmuje <code>CreateTicketCommand</code> i zwraca <code>Ticket</code>”.</li>
-  <li><strong><code>in</code> przed <code>TCommand</code>.</strong> Kontrawariancja — mówi, że typ wchodzi do środka i nigdy nie wychodzi. Na razie nic ci nie daje; wpisz i zapomnij, wróci przy pipeline'ach w lekcji 0007.</li>
-  <li><strong><code>Task&lt;T&gt;</code>.</strong> Odpowiednik <code>Promise&lt;T&gt;</code>. Twój handler jest dziś w pełni synchroniczny, ale <em>interfejs</em> musi być asynchroniczny od początku — w lekcji 0008 wejdzie EF Core i każde `SaveChangesAsync` będzie prawdziwym <code>await</code>. Zmiana sygnatury interfejsu później to przepisanie wszystkich handlerów naraz.</li>
+  <li><strong><code>in</code> przed <code>TCommand</code>.</strong> Kontrawariancja — mówi, że typ wchodzi do środka i nigdy nie wychodzi. Na razie nic ci nie daje; wpisz i zapomnij, wróci przy pipeline'ach w lekcji 0008.</li>
+  <li><strong><code>Task&lt;T&gt;</code>.</strong> Odpowiednik <code>Promise&lt;T&gt;</code>. Twój handler jest dziś w pełni synchroniczny, ale <em>interfejs</em> musi być asynchroniczny od początku — w lekcji 0009 wejdzie EF Core i każde `SaveChangesAsync` będzie prawdziwym <code>await</code>. Zmiana sygnatury interfejsu później to przepisanie wszystkich handlerów naraz.</li>
   <li><strong><code>CancellationToken</code>.</strong> Sygnał „klient rozłączył się, przestań pracować”. Framework wstrzykuje go sam. Odpowiednik <code>AbortSignal</code> z <code>fetch</code>.</li>
 </ul>
 
@@ -141,12 +141,16 @@
     <span class="kw">public</span> <span class="ty">Task</span>&lt;<span class="ty">Ticket</span>?&gt; HandleAsync(<span class="ty">GetTicketQuery</span> query, <span class="ty">CancellationToken</span> ct = <span class="kw">default</span>)
         =&gt; <span class="ty">Task</span>.FromResult(store.GetVisibleTo(query.Id, user.Name));
 }</code></pre>
-<p>Różnica nie jest kosmetyczna. Przy sprawdzaniu po fakcie każde nowe query to osobna szansa, żeby zapomnieć o <code>if</code>-ie — a zapomniany <code>if</code> nie wywala testu, tylko cicho oddaje cudze dane. Przy filtrowaniu u źródła nie ma czego zapomnieć, bo nie istnieje metoda zwracająca niezawężone dane. Przy EF Core (lekcja 0008) robi to <strong>global query filter</strong>: jedna linia w <code>DbContext</code>, po której każde zapytanie w aplikacji jest zawężone automatycznie.</p>
+<p>Różnica nie jest kosmetyczna. Przy sprawdzaniu po fakcie każde nowe query to osobna szansa, żeby zapomnieć o <code>if</code>-ie — a zapomniany <code>if</code> nie wywala testu, tylko cicho oddaje cudze dane. Przy filtrowaniu u źródła nie ma czego zapomnieć, bo nie istnieje metoda zwracająca niezawężone dane. Przy EF Core (lekcja 0009) robi to <strong>global query filter</strong>: jedna linia w <code>DbContext</code>, po której każde zapytanie w aplikacji jest zawężone automatycznie.</p>
 
 <div class="callout warn">
   <strong>404 czy 403?</strong> Gdy ktoś prosi o cudze zgłoszenie, <code>403 Forbidden</code> jest uczciwe, ale <em>potwierdza istnienie zasobu</em> — wystarczy przelecieć id od 1 do 10000, żeby poznać rozmiar systemu i zajęte identyfikatory. Dla danych wrażliwych standardem jest <code>404</code>. Przy filtrowaniu u źródła dostajesz to za darmo: handler zwraca <code>null</code>, endpoint robi <code>TypedResults.NotFound()</code> i w ogóle nie wie, że autoryzacja istnieje.
 </div>
 <p class="sidenote">Mechanika autoryzacji w ASP.NET Core — <code>[Authorize]</code>, polityki, <code>IAuthorizationHandler</code>, resource-based authorization — to osobny temat, poza zakresem kursu na tym etapie. Tutaj chodzi o samo umiejscowienie: <strong>gdzie</strong> ta decyzja zapada, nie <strong>czym</strong> się ją zapisuje.</p>
+
+<div class="callout">
+  <strong>Aktualizacja struktury.</strong> Po tej lekcji projekt rozrósł się do sześciu przypadków użycia i płaskie pliki w <code>Features/Tickets/</code> przestały wystarczać. Docelowy układ (obowiązujący od lekcji 0006) to folder na przypadek użycia: <code>Features/Tickets/Commands/CreateTicket/</code> z <code>CreateTicketCommand.cs</code>, <code>CreateTicketHandler.cs</code> i <code>CreateTicketEndpoint.cs</code>, oraz analogicznie <code>Queries/GetTicket/</code>. Endpoint przestaje być lambdą — to <code>public static class XEndpoint</code> z metodą <code>Map</code> i prywatną <code>HandleAsync</code>.
+</div>
 
 <h2>Krok 4: rejestracja i endpointy</h2>
 <p>Handler to zwykły serwis — rejestruje się tak jak wszystko inne. W <code>TicketsFeature.AddTickets</code>:</p>
@@ -270,7 +274,7 @@ handler             | UNKNOWN</span></code></pre>
 
 <details class="recall">
   <summary>Po co interfejs handlera jest asynchroniczny, skoro implementacja nie jest?</summary>
-  <p>Bo przy EF Core (lekcja 0008) każdy zapis stanie się prawdziwym <code>await</code>. Zmiana sygnatury interfejsu później oznacza przepisanie wszystkich handlerów i wszystkich endpointów naraz. <code>Task.FromResult</code> to koszt jednej linii dzisiaj zamiast refactoru jutro.</p>
+  <p>Bo przy EF Core (lekcja 0009) każdy zapis stanie się prawdziwym <code>await</code>. Zmiana sygnatury interfejsu później oznacza przepisanie wszystkich handlerów i wszystkich endpointów naraz. <code>Task.FromResult</code> to koszt jednej linii dzisiaj zamiast refactoru jutro.</p>
 </details>
 
 <details class="recall">
@@ -296,7 +300,7 @@ handler             | UNKNOWN</span></code></pre>
 <nav class="lesson-nav">
   <a href="0004-vertical-slices.html">← Lekcja 0004</a>
   <a href="../reference/cqrs-handlers.html">Ściąga: Handlery</a>
-  <a href="../reference/glossary.html">Glossary</a>
+  <a href="0006-dispatcher-isender.html">Lekcja 0006 →</a>
 </nav>
 </div>
 </body>

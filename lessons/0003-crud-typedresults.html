@@ -166,7 +166,7 @@ tickets.MapDelete(<span class="str">"/{id:int}"</span>,
 <div class="callout analogy">
   W JS tego problemu nie miałeś: event loop jest jednowątkowy, więc między <code>const n = counter</code> a <code>counter = n + 1</code> nikt ci się nie wcina. ASP.NET Core obsługuje żądania <em>naprawdę</em> równolegle, na puli wątków. To pierwsza rzecz z tego kursu, która nie ma odpowiednika po stronie frontu.
 </div>
-<p>Przy EF Core (lekcja 0008) problem zniknie u źródła: <code>DbContext</code> jest Scoped, każde żądanie ma własny, nie ma czego blokować. To jest właśnie <em>powód</em>, dla którego jest Scoped.</p>
+<p>Przy EF Core (lekcja 0009) problem zniknie u źródła: <code>DbContext</code> jest Scoped, każde żądanie ma własny, nie ma czego blokować. To jest właśnie <em>powód</em>, dla którego jest Scoped.</p>
 
 <h2>Krok 6: skąd biorą się <code>Id</code></h2>
 <p>Zostało jedno miejsce, którego nikt jeszcze nie ruszył. Twój <code>Add</code> nadaje identyfikator tak:</p>

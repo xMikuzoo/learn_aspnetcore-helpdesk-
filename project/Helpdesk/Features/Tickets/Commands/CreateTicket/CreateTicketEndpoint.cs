@@ -10,10 +10,10 @@ public static class CreateTicketEndpoint
 
     private static async Task<Created<TicketDto>> HandleAsync(
         CreateTicketRequest request,
-        ICommandHandler<CreateTicketCommand, TicketDto> handler,
+        ISender sender,
         CancellationToken cancellationToken)
     {
-        var ticket = await handler.HandleAsync(new CreateTicketCommand(request.Title), cancellationToken);
+        var ticket = await sender.Send(new CreateTicketCommand(request.Title), cancellationToken);
         return TypedResults.Created($"/tickets/{ticket.Id}", ticket);
     }
 }

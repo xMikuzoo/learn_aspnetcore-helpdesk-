@@ -9,10 +9,10 @@ public static class ListTicketsEndpoint
         tickets.MapGet("/", HandleAsync).WithName("ListTickets");
 
     private static async Task<Ok<IReadOnlyList<TicketDto>>> HandleAsync(
-        IQueryHandler<ListTicketsQuery, IReadOnlyList<TicketDto>> handler,
+        ISender sender,
         CancellationToken cancellationToken)
     {
-        var tickets = await handler.HandleAsync(new ListTicketsQuery(), cancellationToken);
+        var tickets = await sender.Send(new ListTicketsQuery(), cancellationToken);
         return TypedResults.Ok(tickets);
     }
 }

@@ -10,10 +10,10 @@ public static class GetTicketEndpoint
 
     private static async Task<Results<Ok<TicketDto>, NotFound>> HandleAsync(
         int id,
-        IQueryHandler<GetTicketQuery, TicketDto?> handler,
+        ISender sender,
         CancellationToken cancellationToken)
     {
-        var ticket = await handler.HandleAsync(new GetTicketQuery(id), cancellationToken);
+        var ticket = await sender.Send(new GetTicketQuery(id), cancellationToken);
         return ticket is { } found ? TypedResults.Ok(found) : TypedResults.NotFound();
     }
 }

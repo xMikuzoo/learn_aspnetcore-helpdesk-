@@ -5,6 +5,7 @@ using Helpdesk.Features.Tickets;
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddCurrentUser();
+builder.Services.AddDispatcher();
 builder.Services.AddTickets();
 builder.Services.AddDiagnostics();
 

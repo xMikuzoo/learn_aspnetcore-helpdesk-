@@ -9,10 +9,10 @@ public static class GetTicketMetricsEndpoint
         tickets.MapGet("/metrics", HandleAsync).WithName("GetTicketMetrics");
 
     private static async Task<Ok<TicketMetricsDto>> HandleAsync(
-        IQueryHandler<GetTicketMetricsQuery, TicketMetricsDto> handler,
+        ISender sender,
         CancellationToken cancellationToken)
     {
-        var metrics = await handler.HandleAsync(new GetTicketMetricsQuery(), cancellationToken);
+        var metrics = await sender.Send(new GetTicketMetricsQuery(), cancellationToken);
         return TypedResults.Ok(metrics);
     }
 }

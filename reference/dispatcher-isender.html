@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dispatcher / ISender — ściąga</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<div class="page">
+<header class="lesson-head">
+  <div class="kicker">Reference · Mediator</div>
+  <h1>Dispatcher / <code>ISender</code></h1>
+  <p class="subtitle">Ściąga do druku. Nazwy MediatR wg <a href="https://github.com/jbogard/MediatR/wiki">MediatR Wiki</a>; kod i komunikaty błędów zweryfikowane na .NET 10.0.400.</p>
+  <p class="meta">Ćwiczone w <a href="../lessons/0006-dispatcher-isender.html">lekcji 0006</a>.</p>
+</header>
+
+<h2>Trzy kawałki</h2>
+<pre><code><span class="kw">public interface</span> <span class="ty">ICommand</span>&lt;<span class="ty">TResult</span>&gt;;                <span class="cm">// marker: niesie typ wyniku</span>
+<span class="kw">public interface</span> <span class="ty">IQuery</span>&lt;<span class="ty">TResult</span>&gt;;
+
+<span class="kw">public interface</span> <span class="ty">ICommandHandler</span>&lt;<span class="kw">in</span> <span class="ty">TCommand</span>, <span class="ty">TResult</span>&gt;
+    <span class="kw">where</span> <span class="ty">TCommand</span> : <span class="ty">ICommand</span>&lt;<span class="ty">TResult</span>&gt;   <span class="cm">// spina command z wynikiem</span>
+{
+    <span class="ty">Task</span>&lt;<span class="ty">TResult</span>&gt; HandleAsync(<span class="ty">TCommand</span> command, <span class="ty">CancellationToken</span> cancellationToken = <span class="kw">default</span>);
+}
+
+<span class="kw">public interface</span> <span class="ty">ISender</span>
+{
+    <span class="ty">Task</span>&lt;<span class="ty">TResult</span>&gt; Send&lt;<span class="ty">TResult</span>&gt;(<span class="ty">ICommand</span>&lt;<span class="ty">TResult</span>&gt; command, <span class="ty">CancellationToken</span> cancellationToken = <span class="kw">default</span>);
+    <span class="ty">Task</span>&lt;<span class="ty">TResult</span>&gt; Send&lt;<span class="ty">TResult</span>&gt;(<span class="ty">IQuery</span>&lt;<span class="ty">TResult</span>&gt; query, <span class="ty">CancellationToken</span> cancellationToken = <span class="kw">default</span>);
+}</code></pre>
+<div class="callout">
+  <strong>Po co marker.</strong> W miejscu wywołania kompilator widzi tylko argument. Marker zapisuje typ wyniku w typie commanda, więc <code>await sender.Send(new GetTicketQuery(5))</code> ma typ <code>TicketDto?</code> bez podawania czegokolwiek ręcznie.
+</div>
+
+<h2>Rdzeń: refleksja</h2>
+<pre><code><span class="kw">public class</span> <span class="ty">Sender</span>(<span class="ty">IServiceProvider</span> provider) : <span class="ty">ISender</span>
+{
+    <span class="kw">public</span> <span class="ty">Task</span>&lt;<span class="ty">TResult</span>&gt; Send&lt;<span class="ty">TResult</span>&gt;(<span class="ty">ICommand</span>&lt;<span class="ty">TResult</span>&gt; command, <span class="ty">CancellationToken</span> ct = <span class="kw">default</span>) =&gt;
+        Dispatch&lt;<span class="ty">TResult</span>&gt;(<span class="kw">typeof</span>(<span class="ty">ICommandHandler</span>&lt;,&gt;), command, ct);
+
+    <span class="kw">private</span> <span class="ty">Task</span>&lt;<span class="ty">TResult</span>&gt; Dispatch&lt;<span class="ty">TResult</span>&gt;(<span class="ty">Type</span> openHandlerType, <span class="kw">object</span> message, <span class="ty">CancellationToken</span> ct)
+    {
+        <span class="kw">var</span> handlerType = openHandlerType.MakeGenericType(message.GetType(), <span class="kw">typeof</span>(<span class="ty">TResult</span>));
+        <span class="kw">dynamic</span> handler = provider.GetRequiredService(handlerType);
+        <span class="kw">return</span> handler.HandleAsync((<span class="kw">dynamic</span>)message, ct);
+    }
+}</code></pre>
+<table>
+  <thead><tr><th>Element</th><th>Znaczenie</th></tr></thead>
+  <tbody>
+    <tr><td><code>typeof(IHandler&lt;,&gt;)</code></td><td>otwarty typ generyczny — szablon bez wypełnionych parametrów</td></tr>
+    <tr><td><code>MakeGenericType(a, b)</code></td><td>wypełnia szablon, zwraca <code>Type</code> do zapytania kontenera</td></tr>
+    <tr><td><code>message.GetType()</code></td><td>konkretny typ commanda, niedostępny przy kompilacji</td></tr>
+    <tr><td><code>dynamic</code></td><td>wyłącza kontrolę typów w tej linii; metoda szukana po nazwie w runtime</td></tr>
+  </tbody>
+</table>
+
+<h2>Rejestracja i użycie</h2>
+<pre><code>services.AddScoped&lt;<span class="ty">ISender</span>, <span class="ty">Sender</span>&gt;();                                   <span class="cm">// Scoped, nie Singleton</span>
+services.AddScoped&lt;<span class="ty">ICommandHandler</span>&lt;<span class="ty">CreateTicketCommand</span>, <span class="ty">TicketDto</span>&gt;, <span class="ty">CreateTicketHandler</span>&gt;();
+
+<span class="kw">public record</span> <span class="ty">CreateTicketCommand</span>(<span class="kw">string</span> Title) : <span class="ty">ICommand</span>&lt;<span class="ty">TicketDto</span>&gt;;
+
+<span class="kw">var</span> ticket = <span class="kw">await</span> sender.Send(<span class="kw">new</span> <span class="ty">CreateTicketCommand</span>(request.Title), cancellationToken);</code></pre>
+<p>Request (kontrakt HTTP) markera <strong>nie</strong> dostaje — o dispatcherze nie wie nic.</p>
+
+<h2>Diagnostyka</h2>
+<table>
+  <thead><tr><th>Komunikat</th><th>Kiedy</th><th>Przyczyna</th></tr></thead>
+  <tbody>
+    <tr><td><code>CS0311</code> — „Brak niejawnej konwersji … na <code>ICommand&lt;…&gt;</code>”</td><td>kompilacja</td><td>record bez markera</td></tr>
+    <tr><td><code>No service for type 'ICommandHandler`2[…]' has been registered</code></td><td>pierwsze żądanie, 500</td><td>brak <code>AddScoped</code> dla handlera</td></tr>
+    <tr><td><code>Cannot resolve scoped service '…' from root provider</code></td><td>pierwsze żądanie, 500</td><td><code>Sender</code> jako Singleton</td></tr>
+  </tbody>
+</table>
+<div class="callout warn">
+  <strong>Service locator.</strong> Kontener widzi w konstruktorze <code>Sender</code> tylko <code>IServiceProvider</code>, więc walidacja w <code>Build()</code> nie sprawdzi, czy handlery istnieją. Część błędów przenosi się ze startu na pierwsze żądanie. Łagodzenie: auto-rejestracja przez skan assembly albo test integracyjny po wszystkich trasach.
+</div>
+
+<h2>Mapowanie na MediatR</h2>
+<table>
+  <thead><tr><th>Własny dispatcher</th><th>MediatR</th></tr></thead>
+  <tbody>
+    <tr><td><code>ICommand&lt;T&gt;</code> / <code>IQuery&lt;T&gt;</code></td><td><code>IRequest&lt;TResponse&gt;</code> (jeden na oba)</td></tr>
+    <tr><td><code>ICommandHandler&lt;TCommand, TResult&gt;</code></td><td><code>IRequestHandler&lt;TRequest, TResponse&gt;</code></td></tr>
+    <tr><td><code>HandleAsync(command, ct)</code></td><td><code>Handle(request, ct)</code></td></tr>
+    <tr><td><code>ISender.Send</code></td><td><code>ISender.Send</code></td></tr>
+    <tr><td>ręczne <code>AddScoped</code></td><td><code>AddMediatR(cfg =&gt; cfg.RegisterServicesFromAssemblyContaining&lt;Program&gt;())</code></td></tr>
+    <tr><td>—</td><td><code>INotification</code> + <code>IPublisher.Publish</code></td></tr>
+    <tr><td>—</td><td><code>IPipelineBehavior</code> — kod wokół każdego handlera</td></tr>
+  </tbody>
+</table>
+<p>Licencja: MediatR ≤ 12.x Apache 2.0; od 13 wymagany klucz (<a href="https://mediatr.io">mediatr.io</a>) z darmowym progiem. Alternatywa MIT: <a href="https://github.com/martinothamar/Mediator">martinothamar/Mediator</a>.</p>
+
+<nav class="lesson-nav">
+  <a href="glossary.html">← Glossary</a>
+  <a href="cqrs-handlers.html">Ściąga: Command / Query</a>
+  <a href="../lessons/0006-dispatcher-isender.html">Lekcja 0006 →</a>
+</nav>
+</div>
+</body>
+</html>

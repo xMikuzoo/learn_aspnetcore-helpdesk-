@@ -11,10 +11,10 @@ public static class UpdateTicketEndpoint
     private static async Task<Results<NoContent, NotFound>> HandleAsync(
         int id,
         UpdateTicketRequest request,
-        ICommandHandler<UpdateTicketCommand, bool> handler,
+        ISender sender,
         CancellationToken cancellationToken)
     {
-        var updated = await handler.HandleAsync(new UpdateTicketCommand(id, request.Title), cancellationToken);
+        var updated = await sender.Send(new UpdateTicketCommand(id, request.Title), cancellationToken);
         return updated ? TypedResults.NoContent() : TypedResults.NotFound();
     }
 }

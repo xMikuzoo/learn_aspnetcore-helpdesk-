@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>0006 · Dispatcher (ISender) — ASP.NET Core dla frontendowca</title>
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/quiz.js" defer></script>
+<script src="../assets/checklist.js" defer></script>
+</head>
+<body>
+<div class="page">
+<header class="lesson-head">
+  <div class="kicker">Lekcja 0006 · ~25 min · projekt Helpdesk</div>
+  <h1>Dispatcher: jeden <code>ISender</code> zamiast dwudziestu handlerów</h1>
+  <p class="subtitle">Cel: napisać własny mediator — trzydzieści linii, po których endpoint przestaje znać typ handlera i mówi tylko <code>sender.Send(command)</code>. Po drodze zobaczysz, <em>czym</em> MediatR jest naprawdę, i co dokładnie tracisz, oddając mu wywołanie.</p>
+  <p class="meta">Wymaga: <a href="0005-command-query-handlery.html">lekcji 0005</a> (handlery) i struktury <code>Commands/</code> / <code>Queries/</code>. Ściąga: <a href="../reference/dispatcher-isender.html">Dispatcher / ISender</a>.</p>
+</header>
+
+<h2>Problem: endpoint zna handlera po imieniu</h2>
+<p>Tak wygląda dziś twój endpoint tworzenia zgłoszenia:</p>
+<pre><code><span class="kw">private static async</span> <span class="ty">Task</span>&lt;<span class="ty">Created</span>&lt;<span class="ty">TicketDto</span>&gt;&gt; HandleAsync(
+    <span class="ty">CreateTicketRequest</span> request,
+    <span class="ty">ICommandHandler</span>&lt;<span class="ty">CreateTicketCommand</span>, <span class="ty">TicketDto</span>&gt; handler,
+    <span class="ty">CancellationToken</span> cancellationToken)</code></pre>
+<p>Ta druga linia to cały problem. Sześć endpointów — sześć różnych typów wstrzykiwanych w sześciu miejscach; przy dwudziestu przypadkach użycia dwadzieścia. I trzy konkretne bolączki:</p>
+<ul>
+  <li><strong>Zmiana typu wyniku dotyka dwóch plików.</strong> Handler zaczyna zwracać <code>Result&lt;TicketDto&gt;</code> zamiast <code>TicketDto</code> — poprawiasz handler <em>i</em> deklarację parametru w endpoincie. Kompilator ci przypomni, ale to robota mechaniczna.</li>
+  <li><strong>Nie ma gdzie wpiąć kodu wspólnego.</strong> „Loguj każdy command”, „waliduj każdy command”, „każdy command w transakcji” — nie ma jednego miejsca, przez które przechodzą wszystkie. Trzeba by dopisać to do dwudziestu handlerów.</li>
+  <li><strong>Endpoint zna szczegół implementacyjny.</strong> Że istnieje typ <code>ICommandHandler&lt;,&gt;</code>, że ma dwa parametry, że wynik jest tym drugim. Endpoint ma robić HTTP, nie znać architekturę warstwy niżej.</li>
+</ul>
+<p>Docelowo chcemy jednej linii:</p>
+<pre><code><span class="kw">var</span> ticket = <span class="kw">await</span> sender.Send(<span class="kw">new</span> <span class="ty">CreateTicketCommand</span>(request.Title), cancellationToken);</code></pre>
+<p><code>sender</code> jest zawsze ten sam. Zmienia się tylko obiekt, który mu podajesz — a on sam znajduje handlera. To jest <strong>mediator</strong> (albo <em>dispatcher</em>: w tym kontekście te słowa znaczą to samo).</p>
+
+<h2>Krok 1: skąd <code>Send</code> ma wiedzieć, co zwrócić</h2>
+<p>Napisz sobie w głowie sygnaturę, którą chcemy:</p>
+<pre><code><span class="ty">Task</span>&lt;???&gt; Send(<span class="kw">object</span> command);</code></pre>
+<p>I od razu widać dziurę: <code>var ticket = await sender.Send(...)</code> ma dać <code>TicketDto</code>, a nie <code>object</code>. Kompilator musi znać typ wyniku <em>w miejscu wywołania</em>. Skąd ma go wziąć? Jedyne, co tam widać, to typ commanda. Czyli <strong>typ wyniku musi być zapisany w typie commanda</strong>.</p>
+<p>Stąd para interfejsów-markerów. Nie mają żadnych metod — niosą wyłącznie informację typu:</p>
+<p class="filename">project/Helpdesk/Common/Cqrs.cs</p>
+<pre><code><span class="kw">namespace</span> Helpdesk.Common;
+
+<span class="cm">/// &lt;summary&gt;Operacja zmieniająca stan, zwracająca TResult.&lt;/summary&gt;</span>
+<span class="kw">public interface</span> <span class="ty">ICommand</span>&lt;<span class="ty">TResult</span>&gt;;
+
+<span class="cm">/// &lt;summary&gt;Zapytanie o dane zwracające TResult, bez zmiany stanu.&lt;/summary&gt;</span>
+<span class="kw">public interface</span> <span class="ty">IQuery</span>&lt;<span class="ty">TResult</span>&gt;;
+
+<span class="kw">public interface</span> <span class="ty">ICommandHandler</span>&lt;<span class="kw">in</span> <span class="ty">TCommand</span>, <span class="ty">TResult</span>&gt; <span class="kw">where</span> <span class="ty">TCommand</span> : <span class="ty">ICommand</span>&lt;<span class="ty">TResult</span>&gt;
+{
+    <span class="ty">Task</span>&lt;<span class="ty">TResult</span>&gt; HandleAsync(<span class="ty">TCommand</span> command, <span class="ty">CancellationToken</span> cancellationToken = <span class="kw">default</span>);
+}
+
+<span class="kw">public interface</span> <span class="ty">IQueryHandler</span>&lt;<span class="kw">in</span> <span class="ty">TQuery</span>, <span class="ty">TResult</span>&gt; <span class="kw">where</span> <span class="ty">TQuery</span> : <span class="ty">IQuery</span>&lt;<span class="ty">TResult</span>&gt;
+{
+    <span class="ty">Task</span>&lt;<span class="ty">TResult</span>&gt; HandleAsync(<span class="ty">TQuery</span> query, <span class="ty">CancellationToken</span> cancellationToken = <span class="kw">default</span>);
+}</code></pre>
+<p><code>public interface ICommand&lt;TResult&gt;;</code> — średnik zamiast <code>{ }</code>. Interfejs bez składowych; C# pozwala na taki zapis od wersji 12. W TS najbliższym odpowiednikiem byłby <em>phantom type</em>: typ, którego jedynym zadaniem jest przenieść informację przez system typów.</p>
+<p>Nowe jest też <code>where TCommand : ICommand&lt;TResult&gt;</code> — <strong>ograniczenie parametru typu</strong>, odpowiednik <code>extends</code> w generykach TS. Czyta się: „<code>TCommand</code> musi być commandem, którego wynikiem jest <code>TResult</code>”. Bez tego dałoby się napisać handler zwracający <code>bool</code> dla commanda zadeklarowanego jako <code>ICommand&lt;TicketDto&gt;</code>, a dispatcher szukałby wtedy handlera, którego nie ma. Ograniczenie sprawia, że taki kod się nie skompiluje.</p>
+
+<h2>Krok 2: kontrakt dispatchera</h2>
+<p class="filename">project/Helpdesk/Common/ISender.cs</p>
+<pre><code><span class="kw">namespace</span> Helpdesk.Common;
+
+<span class="cm">/// &lt;summary&gt;Oddaje command lub query właściwemu handlerowi; wołający nie zna handlera.&lt;/summary&gt;</span>
+<span class="kw">public interface</span> <span class="ty">ISender</span>
+{
+    <span class="ty">Task</span>&lt;<span class="ty">TResult</span>&gt; Send&lt;<span class="ty">TResult</span>&gt;(<span class="ty">ICommand</span>&lt;<span class="ty">TResult</span>&gt; command, <span class="ty">CancellationToken</span> cancellationToken = <span class="kw">default</span>);
+
+    <span class="ty">Task</span>&lt;<span class="ty">TResult</span>&gt; Send&lt;<span class="ty">TResult</span>&gt;(<span class="ty">IQuery</span>&lt;<span class="ty">TResult</span>&gt; query, <span class="ty">CancellationToken</span> cancellationToken = <span class="kw">default</span>);
+}</code></pre>
+<p>Dwie przeciążone metody o tej samej nazwie — kompilator wybierze właściwą po typie argumentu. I najważniejsze: <strong><code>TResult</code> nie jest wpisywane ręcznie</strong>. Piszesz <code>sender.Send(new GetTicketQuery(5))</code>, kompilator widzi, że <code>GetTicketQuery : IQuery&lt;TicketDto?&gt;</code>, więc podstawia <code>TResult = TicketDto?</code> i całe wyrażenie ma typ <code>Task&lt;TicketDto?&gt;</code>. To <em>inferencja typu</em> — dokładnie to, co robi TS, wyciągając <code>T</code> z <code>Promise&lt;T&gt;</code> przy <code>await</code>.</p>
+<div class="callout ask">
+  Nazwa <code>ISender</code> nie jest przypadkowa — tak samo nazywa się ten interfejs w MediatR. Piszemy własny z tą samą nazwą i tą samą metodą <code>Send</code>, żeby podmiana na bibliotekę była później zmianą <code>using</code>-a, a nie przepisywaniem endpointów.
+</div>
+
+<h2>Krok 3: implementacja — tu się dzieje magia</h2>
+<p>Sedno problemu: w metodzie <code>Send&lt;TResult&gt;</code> kompilator zna <strong>tylko</strong> <code>TResult</code>. Konkretny typ commanda (<code>CreateTicketCommand</code>) jest schowany za interfejsem <code>ICommand&lt;TicketDto&gt;</code> — a żeby poprosić kontener o handlera, potrzebujesz <em>obu</em> parametrów: <code>ICommandHandler&lt;CreateTicketCommand, TicketDto&gt;</code>.</p>
+<table>
+  <thead><tr><th></th><th>Kompilacja</th><th>Runtime</th></tr></thead>
+  <tbody>
+    <tr><td>Typ wyniku</td><td><code>TResult</code> — znany</td><td>znany</td></tr>
+    <tr><td>Typ commanda</td><td>tylko <code>ICommand&lt;TResult&gt;</code></td><td><code>command.GetType()</code> — konkretny</td></tr>
+  </tbody>
+</table>
+<p>Skoro konkretny typ jest dostępny dopiero w runtime, to i typ handlera trzeba złożyć w runtime. Służy do tego <strong>refleksja</strong>:</p>
+<pre><code><span class="kw">var</span> handlerType = <span class="kw">typeof</span>(<span class="ty">ICommandHandler</span>&lt;,&gt;).MakeGenericType(command.GetType(), <span class="kw">typeof</span>(<span class="ty">TResult</span>));</code></pre>
+<ul>
+  <li><code>typeof(ICommandHandler&lt;,&gt;)</code> — <em>otwarty typ generyczny</em>, czyli szablon z niewypełnionymi parametrami. Przecinek bez nazw to poprawna składnia i znaczy „dwa parametry”.</li>
+  <li><code>MakeGenericType(a, b)</code> — wypełnia szablon i zwraca <code>Type</code> opisujący <code>ICommandHandler&lt;CreateTicketCommand, TicketDto&gt;</code>.</li>
+  <li>Taki <code>Type</code> podajesz kontenerowi: <code>provider.GetRequiredService(handlerType)</code>.</li>
+</ul>
+<p>Zostaje ostatni kłopot: kontener oddaje <code>object</code>. Rzutowanie <code>((ICommandHandler&lt;?, TResult&gt;)handler)</code> nie ma jak się skompilować, bo pierwszego parametru nie umiesz wpisać. Rozwiązania są dwa — użyjemy prostszego:</p>
+<table>
+  <thead><tr><th>Sposób</th><th>Jak</th><th>Koszt</th></tr></thead>
+  <tbody>
+    <tr><td><code>dynamic</code></td><td>rezygnujesz z kontroli typów w tej jednej linii; metoda wyszukiwana po nazwie w runtime</td><td>literówka wychodzi przy wywołaniu; 3 linie kodu</td></tr>
+    <tr><td>klasa opakowująca</td><td>abstrakcyjny <code>Wrapper&lt;TResult&gt;</code> + generyczny potomek, który <em>zna</em> oba typy</td><td>szybsze i w pełni typowane; ~40 linii — tak robi MediatR</td></tr>
+  </tbody>
+</table>
+<p><code>dynamic</code> to słowo kluczowe C#, które wyłącza kontrolę typów dla danego wyrażenia: „sprawdź w czasie wykonania, czy ten obiekt ma metodę <code>HandleAsync</code>”. Czyli zwykły JavaScript, wpuszczony do C# na jedną linię.</p>
+<div class="callout warn">
+  <strong>To jedyne miejsce w projekcie, gdzie wolno użyć <code>dynamic</code>.</strong> Dispatcher z definicji nie zna typów, którymi żongluje. Wszędzie indziej <code>dynamic</code> znaczy „zgubiłem typ i nie chciało mi się go szukać” i słusznie budzi czujność na review.
+</div>
+
+<h3>Gotowy plik</h3>
+<p class="filename">project/Helpdesk/Common/Sender.cs</p>
+<pre><code><span class="kw">namespace</span> Helpdesk.Common;
+
+<span class="kw">public class</span> <span class="ty">Sender</span>(<span class="ty">IServiceProvider</span> provider) : <span class="ty">ISender</span>
+{
+    <span class="kw">public</span> <span class="ty">Task</span>&lt;<span class="ty">TResult</span>&gt; Send&lt;<span class="ty">TResult</span>&gt;(<span class="ty">ICommand</span>&lt;<span class="ty">TResult</span>&gt; command, <span class="ty">CancellationToken</span> cancellationToken = <span class="kw">default</span>) =&gt;
+        Dispatch&lt;<span class="ty">TResult</span>&gt;(<span class="kw">typeof</span>(<span class="ty">ICommandHandler</span>&lt;,&gt;), command, cancellationToken);
+
+    <span class="kw">public</span> <span class="ty">Task</span>&lt;<span class="ty">TResult</span>&gt; Send&lt;<span class="ty">TResult</span>&gt;(<span class="ty">IQuery</span>&lt;<span class="ty">TResult</span>&gt; query, <span class="ty">CancellationToken</span> cancellationToken = <span class="kw">default</span>) =&gt;
+        Dispatch&lt;<span class="ty">TResult</span>&gt;(<span class="kw">typeof</span>(<span class="ty">IQueryHandler</span>&lt;,&gt;), query, cancellationToken);
+
+    <span class="kw">private</span> <span class="ty">Task</span>&lt;<span class="ty">TResult</span>&gt; Dispatch&lt;<span class="ty">TResult</span>&gt;(<span class="ty">Type</span> openHandlerType, <span class="kw">object</span> message, <span class="ty">CancellationToken</span> cancellationToken)
+    {
+        <span class="kw">var</span> handlerType = openHandlerType.MakeGenericType(message.GetType(), <span class="kw">typeof</span>(<span class="ty">TResult</span>));
+        <span class="kw">dynamic</span> handler = provider.GetRequiredService(handlerType);
+
+        <span class="kw">return</span> handler.HandleAsync((<span class="kw">dynamic</span>)message, cancellationToken);
+    }
+}</code></pre>
+<p>Linia po linii, na przykładzie <code>POST /tickets</code>:</p>
+<table>
+  <thead><tr><th>Linia</th><th>Co się dzieje</th></tr></thead>
+  <tbody>
+    <tr><td><code>Send(command, ct)</code></td><td>endpoint podał <code>CreateTicketCommand</code>; metoda przekazuje dalej szablon <code>ICommandHandler&lt;,&gt;</code> (query dostaje swój szablon — dlatego <code>Dispatch</code> bierze go parametrem, zamiast wpisywać na sztywno)</td></tr>
+    <tr><td><code>MakeGenericType(…)</code></td><td>z szablonu i dwóch typów powstaje <code>ICommandHandler&lt;CreateTicketCommand, TicketDto&gt;</code></td></tr>
+    <tr><td><code>GetRequiredService(handlerType)</code></td><td>kontener oddaje <code>CreateTicketHandler</code> — jako <code>object</code>, bo pytanie było zadane typem z runtime</td></tr>
+    <tr><td><code>dynamic handler</code></td><td>„nie sprawdzaj typu przy kompilacji, znajdź metodę przy wywołaniu” — bo nazwy tego typu nie da się wpisać w kodzie</td></tr>
+    <tr><td><code>handler.HandleAsync(…)</code></td><td>wywołanie handlera; <code>(dynamic)message</code> jest po to, żeby wybrać właściwe przeciążenie po prawdziwym typie, a nie po <code>object</code></td></tr>
+  </tbody>
+</table>
+<div class="callout">
+  <strong>Ten plik piszesz raz w życiu.</strong> W firmowym projekcie robi to za ciebie MediatR i nikt do tego kodu nie zagląda. Tu jest po to, żeby przestał być magią — a nie po to, żebyś umiał go odtworzyć z pamięci.
+</div>
+
+<h2>Krok 4: oznacz commandy i query</h2>
+<p>Każdy record musi teraz powiedzieć, co zwraca:</p>
+<pre><code><span class="kw">public record</span> <span class="ty">CreateTicketCommand</span>(<span class="kw">string</span> Title) : <span class="ty">ICommand</span>&lt;<span class="ty">TicketDto</span>&gt;;
+<span class="kw">public record</span> <span class="ty">UpdateTicketCommand</span>(<span class="kw">int</span> Id, <span class="kw">string</span> Title) : <span class="ty">ICommand</span>&lt;<span class="kw">bool</span>&gt;;
+<span class="kw">public record</span> <span class="ty">DeleteTicketCommand</span>(<span class="kw">int</span> Id) : <span class="ty">ICommand</span>&lt;<span class="kw">bool</span>&gt;;
+
+<span class="kw">public record</span> <span class="ty">GetTicketQuery</span>(<span class="kw">int</span> Id) : <span class="ty">IQuery</span>&lt;<span class="ty">TicketDto</span>?&gt;;
+<span class="kw">public record</span> <span class="ty">ListTicketsQuery</span> : <span class="ty">IQuery</span>&lt;<span class="ty">IReadOnlyList</span>&lt;<span class="ty">TicketDto</span>&gt;&gt;;
+<span class="kw">public record</span> <span class="ty">GetTicketMetricsQuery</span> : <span class="ty">IQuery</span>&lt;<span class="ty">TicketMetricsDto</span>&gt;;</code></pre>
+<p>Uwaga: <code>CreateTicketRequest</code> <strong>nie</strong> dostaje markera. Request to kontrakt z klientem HTTP i nie ma pojęcia o istnieniu dispatchera — to ta sama granica, którą widać w parze <code>UpdateTicketRequest</code> (tylko <code>Title</code>, z body) i <code>UpdateTicketCommand</code> (<code>Id</code> z trasy + <code>Title</code> z body).</p>
+<p>Pliki commandów potrzebują teraz <code>using Helpdesk.Common;</code> — markery mieszkają w innym namespace.</p>
+
+<h3>Endpointy chudną</h3>
+<pre><code><span class="kw">private static async</span> <span class="ty">Task</span>&lt;<span class="ty">Created</span>&lt;<span class="ty">TicketDto</span>&gt;&gt; HandleAsync(
+    <span class="ty">CreateTicketRequest</span> request,
+    <span class="ty">ISender</span> sender,
+    <span class="ty">CancellationToken</span> cancellationToken)
+{
+    <span class="kw">var</span> ticket = <span class="kw">await</span> sender.Send(<span class="kw">new</span> <span class="ty">CreateTicketCommand</span>(request.Title), cancellationToken);
+    <span class="kw">return</span> <span class="ty">TypedResults</span>.Created($<span class="str">"/tickets/{ticket.Id}"</span>, ticket);
+}</code></pre>
+<p><code>ISender sender</code> zamiast <code>ICommandHandler&lt;CreateTicketCommand, TicketDto&gt; handler</code> — i tak samo w pozostałych pięciu endpointach. Handlery zostają bez zmian: <em>one</em> nadal implementują <code>ICommandHandler&lt;…&gt;</code> i nadal rejestrujesz je po jednej linii.</p>
+
+<h3>Rejestracja</h3>
+<p class="filename">project/Helpdesk/Common/CommonServices.cs</p>
+<pre><code><span class="kw">public static</span> <span class="ty">IServiceCollection</span> AddDispatcher(<span class="kw">this</span> <span class="ty">IServiceCollection</span> services)
+{
+    services.AddScoped&lt;<span class="ty">ISender</span>, <span class="ty">Sender</span>&gt;();
+
+    <span class="kw">return</span> services;
+}</code></pre>
+<p>i w <code>Program.cs</code>: <code>builder.Services.AddDispatcher();</code> obok <code>AddCurrentUser()</code>.</p>
+<div class="callout warn">
+  <strong>Scoped, nie Singleton</strong> — mimo że <code>Sender</code> nie ma żadnego stanu i aż kusi, żeby zrobić z niego Singletona. Powód w sekcji „Diagnostyka”, błąd trzeci: Singleton dostaje <em>korzeniowy</em> provider, z którego nie wolno wyciągać serwisów Scoped. Aplikacja wstanie normalnie i wywali się dopiero przy pierwszym żądaniu.
+</div>
+
+<h2>Weryfikacja</h2>
+<p>Po przepięciu wszystkiego API ma zachowywać się <strong>identycznie</strong> jak przed lekcją — dispatcher to refactor, nie zmiana funkcjonalności. Wynik sprawdzony na gotowym kodzie:</p>
+<table>
+  <thead><tr><th>Żądanie</th><th>Odpowiedź</th></tr></thead>
+  <tbody>
+    <tr><td><code>POST /tickets</code> + <code>{"title":"drukarka"}</code></td><td><code>201</code>, <code>Location: /tickets/3</code>, <code>{"id":3,"title":"drukarka"}</code></td></tr>
+    <tr><td><code>GET /tickets/1</code></td><td><code>200</code> <code>{"id":1,"title":"Pierwsze zgłoszenie"}</code></td></tr>
+    <tr><td><code>GET /tickets/99</code></td><td><code>404</code></td></tr>
+    <tr><td><code>PUT /tickets/1</code></td><td><code>204</code> (tytuł faktycznie zmieniony)</td></tr>
+    <tr><td><code>PUT /tickets/99</code></td><td><code>404</code></td></tr>
+    <tr><td><code>DELETE /tickets/2</code>, potem to samo raz jeszcze</td><td><code>204</code>, potem <code>404</code></td></tr>
+    <tr><td><code>GET /tickets/metrics</code></td><td><code>200</code> <code>{"created":1}</code></td></tr>
+    <tr><td><code>GET /diagnostics/lifetimes</code></td><td><code>200</code></td></tr>
+  </tbody>
+</table>
+<p>W konsoli po POST z nagłówkiem <code>X-User: wojtek</code> nadal leci <code>[metrics] wojtek utworzyl zgloszenie; lacznie od startu: 1</code>. Jeśli któryś wiersz u ciebie nie pasuje — sekcja niżej.</p>
+
+<h2>Diagnostyka: trzy błędy, każdy w innym momencie</h2>
+
+<h3>1. Zapomniany marker — kompilacja</h3>
+<pre><code><span class="cm">error CS0311: Nie można użyć typu „CreateTicketCommand” jako parametru typu
+„TCommand” w typie ogólnym lub metodzie „ICommandHandler&lt;TCommand, TResult&gt;”.
+Brak niejawnej konwersji odwołania z typu „CreateTicketCommand”
+na „Helpdesk.Common.ICommand&lt;Helpdesk.Features.Tickets.TicketDto&gt;”.</span></code></pre>
+<p>Ograniczenie <code>where</code> z kroku 1 robi swoją robotę: interfejs handlera już go wymaga, a record jeszcze nie implementuje markera. Dopisz <code>: ICommand&lt;TicketDto&gt;</code>. Ten błąd to <strong>dobra wiadomość</strong> — złapany przy kompilacji, więc nie ma jak dojechać na produkcję.</p>
+
+<h3>2. Brak rejestracji handlera — pierwsze żądanie, 500</h3>
+<pre><code><span class="cm">System.InvalidOperationException: No service for type
+'Helpdesk.Common.ICommandHandler`2[…CreateTicketCommand,…TicketDto]'
+has been registered.
+   at …GetRequiredService(IServiceProvider provider, Type serviceType)
+   at Helpdesk.Common.Sender.Dispatch[TResult](…)</span></code></pre>
+<p>Porównaj z lekcją 0005: tam brak rejestracji dawał komunikat bindera z tabelką i słowem <code>UNKNOWN</code>. Teraz binder jest zadowolony — <code>ISender</code> przecież jest zarejestrowany — a rozczarowanie przychodzi dopiero <em>w środku</em> dispatchera. Nazwa typu w cudzysłowie mówi wprost, której linii <code>AddScoped</code> brakuje.</p>
+
+<h3>3. <code>Sender</code> jako Singleton — pierwsze żądanie, 500</h3>
+<pre><code><span class="cm">System.InvalidOperationException: Cannot resolve scoped service
+'Helpdesk.Common.ICommandHandler`2[…CreateTicketCommand,…TicketDto]'
+from root provider.</span></code></pre>
+<p>Singleton dostaje w konstruktorze <code>IServiceProvider</code> korzenia aplikacji, a nie ten od bieżącego żądania. Wyciągnięcie z korzenia serwisu Scoped byłoby wyciekiem: handler (a z nim <code>ICurrentUser</code>, docelowo <code>DbContext</code>) żyłby do końca życia procesu. Kontener na to nie pozwala.</p>
+<div class="callout analogy">
+  Zauważ, czego tu <em>nie</em> ma: <strong>walidacja z <code>Build()</code> tego nie wyłapała</strong>. W lekcji 0002 captive dependency wysadzała aplikację przy starcie, bo zależność było widać w konstruktorze. <code>Sender</code> deklaruje w konstruktorze tylko <code>IServiceProvider</code> — kontener nie ma pojęcia, że sięgnie po handlera. Wzorzec nazywa się <em>service locator</em> i to jest jego wbudowany koszt: część błędów przenosi się ze startu aplikacji na pierwsze żądanie.
+</div>
+
+<h2>Co dokładnie kupiłeś i za ile</h2>
+<table>
+  <thead><tr><th>Zysk</th><th>Cena</th></tr></thead>
+  <tbody>
+    <tr><td>endpoint nie zna handlera — zmiana typu wyniku dotyka jednego pliku</td><td>literówka w rejestracji wychodzi w runtime, nie przy kompilacji</td></tr>
+    <tr><td>jedno miejsce, przez które przechodzą wszystkie commandy (logowanie, walidacja, transakcja)</td><td>skok przez refleksję zamiast bezpośredniego wywołania</td></tr>
+    <tr><td>„co ten system potrafi” = lista recordów z markerem</td><td>skok do definicji przestaje prowadzić do handlera — trzeba szukać po nazwie typu</td></tr>
+  </tbody>
+</table>
+<p>Ostatni wiersz to najczęstszy zarzut wobec mediatorów i wart jest zapamiętania, bo pada na rozmowach: <em>„nawigacja po kodzie przestaje działać”</em>. W IDE ratują cię wtyczki (Rider skacze z commanda do handlera), w code review — konwencja nazw <code>XCommand</code> / <code>XHandler</code>, którą już masz.</p>
+<p>Cenę z pierwszego wiersza łagodzi się na dwa sposoby: <strong>automatyczną rejestracją</strong> handlerów (skan assembly zamiast ręcznych linii — tak działa <code>AddMediatR</code>) albo <strong>testem integracyjnym</strong>, który dotyka każdej trasy. Do obu wrócimy: skan przy MediatR, testy w lekcji 0011.</p>
+
+<h2>MediatR w pięć minut</h2>
+<p>Napisałeś właśnie mediator. MediatR to ten sam pomysł, dopracowany: cache typów zamiast refleksji przy każdym żądaniu, opakowania zamiast <code>dynamic</code>, do tego notyfikacje i pipeline. Mapowanie nazw jeden do jednego:</p>
+<table>
+  <thead><tr><th>Twój kod</th><th>MediatR</th></tr></thead>
+  <tbody>
+    <tr><td><code>ICommand&lt;TResult&gt;</code>, <code>IQuery&lt;TResult&gt;</code></td><td><code>IRequest&lt;TResponse&gt;</code> — jeden marker na oba</td></tr>
+    <tr><td><code>ICommandHandler&lt;TCommand, TResult&gt;</code></td><td><code>IRequestHandler&lt;TRequest, TResponse&gt;</code></td></tr>
+    <tr><td><code>HandleAsync(command, ct)</code></td><td><code>Handle(request, ct)</code></td></tr>
+    <tr><td><code>ISender.Send(command, ct)</code></td><td><code>ISender.Send(request, ct)</code> — ta sama nazwa</td></tr>
+    <tr><td>ręczne <code>AddScoped</code> per handler</td><td><code>services.AddMediatR(cfg =&gt; cfg.RegisterServicesFromAssemblyContaining&lt;Program&gt;())</code></td></tr>
+    <tr><td>—</td><td><code>INotification</code> + <code>IPublisher.Publish</code>: zero lub wielu odbiorców</td></tr>
+    <tr><td>—</td><td><code>IPipelineBehavior</code>: kod wokół <em>każdego</em> handlera (dostaje request i <code>next</code>, jak middleware w Express)</td></tr>
+  </tbody>
+</table>
+<p>Jeden szczegół różni się naprawdę: MediatR ma <strong>jeden</strong> marker <code>IRequest&lt;T&gt;</code> dla commandów i query. Rozdział na command/query robi się wtedy konwencją nazw albo własnymi interfejsami dziedziczącymi po <code>IRequest&lt;T&gt;</code> — drugie podejście zobaczysz w wielu firmowych repo i teraz wiesz, po co ludzie to piszą.</p>
+<div class="callout warn">
+  <strong>Licencja.</strong> MediatR do wersji 12.x jest na Apache 2.0. Od 13 wymaga klucza licencyjnego (<a href="https://mediatr.io">mediatr.io</a>), z darmowym progiem dla małych przychodów. Zanim wciągniesz go do firmowego projektu, sprawdź, której wersji używacie. Alternatywa na MIT o niemal identycznym API: <a href="https://github.com/martinothamar/Mediator">martinothamar/Mediator</a> (generator kodu zamiast refleksji).
+</div>
+
+<div class="task">
+  <h3>Zadanie</h3>
+  <ol>
+    <li>Przeczytaj <code>Common/Cqrs.cs</code> i <code>Common/ISender.cs</code> — markery i kontrakt dispatchera. Odpowiedz sobie: dlaczego <code>Send</code> nie potrzebuje, żebyś podał typ wyniku?</li>
+    <li>Przeczytaj <code>Common/Sender.cs</code> z tabelką „linia po linii” powyżej. To jedyny plik w kursie, którego nie musisz umieć napisać z pamięci.</li>
+    <li>Zobacz, co zniknęło z endpointów: <code>git diff</code> na <code>Features/Tickets/**/\*Endpoint.cs</code>. W każdym jedna linia mniej wiedzy o warstwie niżej.</li>
+    <li>Przejdź całą tabelę z sekcji „Weryfikacja”. Wszystkie statusy mają się zgadzać — dispatcher niczego nie zmienił na zewnątrz.</li>
+    <li><strong>Zobacz błąd 1.</strong> Skasuj <code>: ICommand&lt;bool&gt;</code> z <code>DeleteTicketCommand</code> i zbuduj — <code>CS0311</code>. Przywróć.</li>
+    <li><strong>Zobacz błąd 3.</strong> Zmień rejestrację na <code>AddSingleton&lt;ISender, Sender&gt;()</code>, uruchom (aplikacja wstaje!), wyślij POST — 500 i „Cannot resolve scoped service … from root provider”. Przywróć <code>AddScoped</code>.</li>
+  </ol>
+  <div class="check">
+    <label><input type="checkbox" id="c1"> Wiem, po co commandowi marker <code>ICommand&lt;TResult&gt;</code></label>
+    <label><input type="checkbox" id="c2"> Umiem przeczytać <code>Sender.Dispatch</code> linia po linii</label>
+    <label><input type="checkbox" id="c3"> Widzę w diffie, że endpointy wstrzykują <code>ISender</code> zamiast handlera</label>
+    <label><input type="checkbox" id="c4"> Cała tabela weryfikacyjna zgodna — API działa jak przed refactorem</label>
+    <label><input type="checkbox" id="c5"> Widziałem <code>CS0311</code> i „Cannot resolve scoped service … from root provider”</label>
+    <label><input type="checkbox" id="c6"> Umiem powiedzieć, co dispatcher zabiera w zamian za to, co daje</label>
+  </div>
+</div>
+
+<h2>Sprawdź się</h2>
+<p>Odpowiedz zanim klikniesz. Zła odpowiedź nie zdradza dobrej — spróbuj jeszcze raz.</p>
+
+<div class="quiz" id="q1" data-answer="2">
+  <div class="q">Po co commandowi marker <code>ICommand&lt;TicketDto&gt;</code>?</div>
+  <button class="opt">Żeby kontener umiał go utworzyć</button>
+  <button class="opt">Żeby odróżnić go od zapytania</button>
+  <button class="opt">Żeby <code>Send</code> znał typ wyniku</button>
+  <div class="why">Bez markera <code>await sender.Send(cmd)</code> nie miałoby jak dać <code>TicketDto</code> — kompilator w miejscu wywołania widzi wyłącznie typ argumentu. Marker przenosi typ wyniku przez system typów, a kompilator wyciąga go inferencją. Odróżnianie od query to skutek uboczny, a commandy tworzysz sam przez <code>new</code>, nie przez kontener.</div>
+</div>
+
+<div class="quiz" id="q2" data-answer="1">
+  <div class="q">Czemu <code>Dispatch</code> potrzebuje refleksji zamiast zwykłego rzutowania?</div>
+  <button class="opt">Bo kontener zwraca zawsze <code>object</code></button>
+  <button class="opt">Bo typ commanda znany dopiero w runtime</button>
+  <button class="opt">Bo <code>Task</code> nie daje się rzutować</button>
+  <div class="why">W <code>Send&lt;TResult&gt;</code> kompilator widzi argument jako <code>ICommand&lt;TResult&gt;</code>; że to akurat <code>CreateTicketCommand</code>, wiadomo dopiero z <code>command.GetType()</code>. Typ handlera potrzebuje obu parametrów naraz, więc trzeba go złożyć w runtime przez <code>MakeGenericType</code>.</div>
+</div>
+
+<div class="quiz" id="q3" data-answer="0">
+  <div class="q">„Cannot resolve scoped service … from root provider” — przyczyna?</div>
+  <button class="opt"><code>Sender</code> zarejestrowany jako Singleton</button>
+  <button class="opt">Handler zarejestrowany jako Transient</button>
+  <button class="opt">Brakuje wywołania <code>AddDispatcher</code></button>
+  <div class="why">Singleton dostaje provider korzenia, a z korzenia nie wolno wyciągać serwisów Scoped — żyłyby wtedy do końca procesu. Brak <code>AddDispatcher</code> dałby inny komunikat, o niezarejestrowanym <code>ISender</code>, a Transient handler rozwiązałby się bez protestu.</div>
+</div>
+
+<div class="quiz" id="q4" data-answer="1">
+  <div class="q">Co tracisz, wstawiając dispatcher między endpoint a handler?</div>
+  <button class="opt">Możliwość testowania handlerów osobno</button>
+  <button class="opt">Wykrycie braku rejestracji przy starcie</button>
+  <button class="opt">Kontrolę nad czasem życia handlera</button>
+  <div class="why">Kontener widzi w konstruktorze <code>Sender</code> tylko <code>IServiceProvider</code>, więc nie zweryfikuje przy <code>Build()</code>, że handler istnieje — dowiesz się dopiero przy żądaniu. Handlery testuje się dalej przez zwykłe <code>new</code>, a lifetime nadal ustawiasz przy rejestracji.</div>
+</div>
+
+<details class="recall">
+  <summary>Jak z <code>ICommand&lt;TResult&gt;</code> powstaje typ handlera do zapytania kontenera?</summary>
+  <p><code>typeof(ICommandHandler&lt;,&gt;).MakeGenericType(command.GetType(), typeof(TResult))</code>. Otwarty typ generyczny to szablon; <code>MakeGenericType</code> wypełnia go konkretnym typem commanda (dostępnym tylko w runtime) i typem wyniku (znanym z inferencji w miejscu wywołania).</p>
+</details>
+
+<details class="recall">
+  <summary>Czemu <code>Sender</code> musi być Scoped, skoro nie ma stanu?</summary>
+  <p>Bo wstrzyknięty w niego <code>IServiceProvider</code> jest tym od bieżącego żądania tylko wtedy, gdy sam <code>Sender</code> jest Scoped. Jako Singleton dostaje provider korzenia i nie może wyciągnąć z niego handlera, który jest Scoped — 500 przy pierwszym żądaniu.</p>
+</details>
+
+<details class="recall">
+  <summary>Trzy błędy z tej lekcji — który wychodzi kiedy?</summary>
+  <p>Zapomniany marker — przy kompilacji (<code>CS0311</code>, dzięki ograniczeniu <code>where</code>). Brak rejestracji handlera i zły lifetime <code>Sender</code>a — dopiero przy pierwszym żądaniu, oba jako 500. To jest cena wzorca service locator.</p>
+</details>
+
+<h2>Źródło pierwotne</h2>
+<div class="callout source">
+  <a href="https://github.com/jbogard/MediatR/wiki">MediatR Wiki</a> (ok. 10 min) — czytaj <em>Basics</em> i <em>Behaviors</em>. Po tej lekcji rozpoznasz tam każdy element: <code>IRequest&lt;T&gt;</code> to twój marker, <code>IRequestHandler</code> to twój handler, <code>Send</code> to twój <code>Send</code>. Reszta biblioteki to optymalizacje i notyfikacje.
+</div>
+
+<div class="callout ask">Coś nie działa — <code>CS0311</code>, 500 z „No service for type”, albo <code>dynamic</code> rzuca czymś dziwnym? Wklej to nauczycielowi w terminalu (Claude Code w <code>C:\PLAYGROUND\asp</code>). Pytanie do zespołu: <em>„której wersji MediatR używamy i czy mamy własne <code>ICommand</code>/<code>IQuery</code> nad <code>IRequest</code>?”</em> — odpowiedź powie ci o stylu repo więcej niż godzina czytania kodu.</div>
+
+<h2>Co dalej</h2>
+<p>Twoje handlery komunikują porażkę przez <code>bool</code> i <code>null</code>. To wystarcza na „nie ma takiego zgłoszenia”, ale nie odróżni „nie ma” od „nie wolno” i od „tytuł jest pusty” — a każdy z tych przypadków to inny status HTTP. W lekcji 0007 wchodzi <strong>globalna obsługa błędów</strong>: własny <code>DomainException</code>, katalog w stylu <code>TicketErrors.NotFound(id)</code> i jeden <code>IExceptionHandler</code>, który zamienia je na odpowiedzi <code>application/problem+json</code>. Endpointy przestaną wtedy zawierać <code>if</code>-y od błędów.</p>
+
+<nav class="lesson-nav">
+  <a href="0005-command-query-handlery.html">← Lekcja 0005</a>
+  <a href="../reference/dispatcher-isender.html">Ściąga: Dispatcher</a>
+  <a href="#">Lekcja 0007 →</a>
+</nav>
+</div>
+</body>
+</html>
