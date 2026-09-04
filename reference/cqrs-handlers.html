@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Command / Query — handlery: ściąga</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<div class="page">
+<header class="lesson-head">
+  <div class="kicker">Reference · CQRS</div>
+  <h1>Command / Query — handlery</h1>
+  <p class="subtitle">Ściąga do druku. Oparta na <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/cqrs">CQRS Pattern</a>; kod i komunikaty błędów zweryfikowane na .NET 10.0.400.</p>
+  <p class="meta">Ćwiczone w <a href="../lessons/0005-command-query-handlery.html">lekcji 0005</a>.</p>
+</header>
+
+<h2>Command czy query?</h2>
+<table>
+  <thead><tr><th></th><th>Command</th><th>Query</th></tr></thead>
+  <tbody>
+    <tr><td>Skutek</td><td>zmienia stan</td><td>brak skutków ubocznych</td></tr>
+    <tr><td>HTTP</td><td>POST, PUT, PATCH, DELETE</td><td>GET</td></tr>
+    <tr><td>Niezmienniki domeny</td><td>tak</td><td>nie ma czego chronić</td></tr>
+    <tr><td>Autoryzacja</td><td colspan="2" style="text-align:center"><strong>tak, po obu stronach</strong></td></tr>
+    <tr><td>Zwraca</td><td>minimum: id, potwierdzenie</td><td>DTO w kształcie dla UI</td></tr>
+    <tr><td>Powtórzenie</td><td>niebezpieczne</td><td>bezpieczne</td></tr>
+    <tr><td>Nazwa</td><td>zadanie biznesowe: <code>AssignTicketCommand</code></td><td>co pobieramy: <code>GetTicketQuery</code></td></tr>
+  </tbody>
+</table>
+<p>Test rozstrzygający: <em>czy wywołanie tego dwa razy pod rząd zmienia cokolwiek?</em> Jeśli tak — command.</p>
+
+<h2>Autoryzacja w query</h2>
+<p>Brak sprawdzenia własności w odczycie to <strong>IDOR</strong> (Broken Access Control, OWASP Top 10). Query nie ma niezmienników, ale autoryzację ma zawsze.</p>
+<table>
+  <thead><tr><th>Rodzaj</th><th>Gdzie</th></tr></thead>
+  <tbody>
+    <tr><td>deklaratywna (rola, uwierzytelnienie)</td><td>na trasie: <code>.RequireAuthorization(…)</code></td></tr>
+    <tr><td>zasobowa (per instancja)</td><td>w handlerze — wymaga danych</td></tr>
+  </tbody>
+</table>
+<div class="callout">
+  <strong>Filtruj u źródła.</strong> <code>store.GetVisibleTo(id, user)</code> zamiast <code>GetById(id)</code> + <code>if</code>. Zapomniany <code>if</code> nie wywala testu — cicho oddaje cudze dane. W EF Core: global query filter.<br>
+  <strong>Zwracaj 404, nie 403</strong>, gdy zasób jest cudzy — 403 potwierdza jego istnienie.
+</div>
+
+<h2>Interfejsy</h2>
+<pre><code><span class="kw">namespace</span> Helpdesk.Common;
+
+<span class="kw">public interface</span> <span class="ty">ICommandHandler</span>&lt;<span class="kw">in</span> <span class="ty">TCommand</span>, <span class="ty">TResult</span>&gt;
+{
+    <span class="ty">Task</span>&lt;<span class="ty">TResult</span>&gt; HandleAsync(<span class="ty">TCommand</span> command, <span class="ty">CancellationToken</span> cancellationToken = <span class="kw">default</span>);
+}
+
+<span class="kw">public interface</span> <span class="ty">IQueryHandler</span>&lt;<span class="kw">in</span> <span class="ty">TQuery</span>, <span class="ty">TResult</span>&gt;
+{
+    <span class="ty">Task</span>&lt;<span class="ty">TResult</span>&gt; HandleAsync(<span class="ty">TQuery</span> query, <span class="ty">CancellationToken</span> cancellationToken = <span class="kw">default</span>);
+}</code></pre>
+
+<h2>Slice: plik na przypadek użycia</h2>
+<pre><code>Features/Tickets/
+  CreateTicket.cs     <span class="cm">// CreateTicketCommand + CreateTicketHandler</span>
+  GetTicket.cs        <span class="cm">// GetTicketQuery + GetTicketHandler</span>
+  TicketsFeature.cs   <span class="cm">// rejestracje + mapowanie endpointów</span></code></pre>
+<pre><code><span class="kw">public record</span> <span class="ty">CreateTicketCommand</span>(<span class="kw">string</span> Title);
+
+<span class="kw">public class</span> <span class="ty">CreateTicketHandler</span>(<span class="ty">ITicketStore</span> store, <span class="ty">ICurrentUser</span> user)
+    : <span class="ty">ICommandHandler</span>&lt;<span class="ty">CreateTicketCommand</span>, <span class="ty">Ticket</span>&gt;
+{
+    <span class="kw">public</span> <span class="ty">Task</span>&lt;<span class="ty">Ticket</span>&gt; HandleAsync(<span class="ty">CreateTicketCommand</span> command, <span class="ty">CancellationToken</span> ct = <span class="kw">default</span>)
+        =&gt; <span class="ty">Task</span>.FromResult(store.Add(command.Title));
+}</code></pre>
+
+<h2>Rejestracja i wywołanie</h2>
+<pre><code>services.AddScoped&lt;<span class="ty">ICommandHandler</span>&lt;<span class="ty">CreateTicketCommand</span>, <span class="ty">Ticket</span>&gt;, <span class="ty">CreateTicketHandler</span>&gt;();
+
+tickets.MapPost(<span class="str">"/"</span>,
+    <span class="kw">async</span> (<span class="ty">CreateTicketRequest</span> request,
+           <span class="ty">ICommandHandler</span>&lt;<span class="ty">CreateTicketCommand</span>, <span class="ty">Ticket</span>&gt; handler,
+           <span class="ty">CancellationToken</span> ct) =&gt;
+    {
+        <span class="kw">var</span> ticket = <span class="kw">await</span> handler.HandleAsync(<span class="kw">new</span> <span class="ty">CreateTicketCommand</span>(request.Title), ct);
+        <span class="kw">return</span> <span class="ty">TypedResults</span>.Created($<span class="str">"/tickets/{ticket.Id}"</span>, ticket);
+    });</code></pre>
+<div class="callout">
+  <strong>Handlery zawsze Scoped.</strong> Zależą od serwisów żądania (<code>ICurrentUser</code>, później <code>DbContext</code>). Singleton nie może po nie sięgać.
+</div>
+
+<h2>Asynchroniczność</h2>
+<table>
+  <thead><tr><th>C#</th><th>JS/TS</th><th>Uwagi</th></tr></thead>
+  <tbody>
+    <tr><td><code>Task&lt;T&gt;</code></td><td><code>Promise&lt;T&gt;</code></td><td><code>Task</code> bez <code>&lt;T&gt;</code> = <code>Promise&lt;void&gt;</code></td></tr>
+    <tr><td><code>await x</code></td><td><code>await x</code></td><td>identycznie</td></tr>
+    <tr><td><code>Task.FromResult(x)</code></td><td><code>Promise.resolve(x)</code></td><td>gdy nie ma na co czekać</td></tr>
+    <tr><td><code>Task.CompletedTask</code></td><td><code>Promise.resolve()</code></td><td>wersja bez wyniku</td></tr>
+    <tr><td><code>CancellationToken</code></td><td><code>AbortSignal</code></td><td>wstrzykiwany przez framework</td></tr>
+    <tr><td><code>async Task&lt;Results&lt;Ok&lt;T&gt;, NotFound&gt;&gt; (…) =&gt;</code></td><td><code>async (): Promise&lt;T｜null&gt; =&gt;</code></td><td>typ przed listą parametrów lambdy</td></tr>
+  </tbody>
+</table>
+<p><code>async</code> bez <code>await</code> w środku → ostrzeżenie <code>CS1998</code> i zbędna maszyna stanów. Użyj <code>Task.FromResult</code>.</p>
+
+<h2>Diagnostyka</h2>
+<table>
+  <thead><tr><th>Objaw</th><th>Kiedy</th><th>Przyczyna</th></tr></thead>
+  <tbody>
+    <tr><td><code>Cannot consume scoped service … from singleton …</code></td><td>start aplikacji</td><td>handler zarejestrowany jako Singleton</td></tr>
+    <tr><td><code>Failure to infer one or more parameters</code>, parametr <code>UNKNOWN</code></td><td>pierwsze żądanie</td><td>brak <code>AddScoped</code> dla handlera</td></tr>
+    <tr><td><code>CS1998</code> — metoda async bez await</td><td>kompilacja</td><td><code>async</code> zamiast <code>Task.FromResult</code></td></tr>
+  </tbody>
+</table>
+<p>Różnica w momencie wykrycia jest istotna: captive dependency wywala aplikację przy starcie, brak rejestracji dopiero przy żądaniu na konkretny endpoint.</p>
+
+<nav class="lesson-nav">
+  <a href="glossary.html">← Glossary</a>
+  <a href="vertical-slices.html">Ściąga: Vertical slices</a>
+  <a href="../lessons/0005-command-query-handlery.html">Lekcja 0005 →</a>
+</nav>
+</div>
+</body>
+</html>

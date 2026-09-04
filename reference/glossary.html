@@ -170,6 +170,27 @@
   <dd>Podział po warstwach (Domain / Application / Infrastructure) z regułą „zależności wskazują do środka”. Alternatywne kryterium podziału wobec vertical slices; oba dają się łączyć. Rozwinięcie w lekcji 0009.</dd>
 </dl>
 
+<h2>CQRS i asynchroniczność</h2>
+<dl>
+  <dt>Command <span class="pl">— komenda</span></dt>
+  <dd>Operacja zmieniająca stan, nazwana zadaniem biznesowym (<code>AssignTicketCommand</code>, nie <code>UpdateStatusCommand</code>). Niesie reguły biznesowe, zwraca minimum. Powtórzenie nie jest bezpieczne.</dd>
+
+  <dt>Query <span class="pl">— zapytanie</span></dt>
+  <dd>Odczyt bez skutków ubocznych. Zwraca DTO w kształcie wygodnym dla UI, bez logiki domenowej. Powtórzenie zawsze bezpieczne.</dd>
+
+  <dt>CQRS <span class="pl">— rozdzielenie odpowiedzialności</span></dt>
+  <dd>Command Query Responsibility Segregation. W wersji lekkiej: dwa interfejsy handlerów i konwencja nazw. W ciężkiej: osobne modele lub bazy do zapisu i odczytu. Patrz <a href="cqrs-handlers.html">ściąga</a>.</dd>
+
+  <dt>Handler</dt>
+  <dd>Klasa obsługująca jeden command albo jedno query. Rejestrowana jako <strong>Scoped</strong>, bo zależy od serwisów żądania. Testowalna bez serwera HTTP.</dd>
+
+  <dt>Task&lt;T&gt;</dt>
+  <dd>Odpowiednik <code>Promise&lt;T&gt;</code>. <code>Task.FromResult(x)</code> ≈ <code>Promise.resolve(x)</code> — używane, gdy metoda spełnia asynchroniczny kontrakt, ale nie ma na co czekać.</dd>
+
+  <dt>CancellationToken</dt>
+  <dd>Sygnał przerwania, odpowiednik <code>AbortSignal</code>. Framework wstrzykuje go do handlera endpointu; przekazuje się go dalej w głąb.</dd>
+</dl>
+
 <h2>Składnia C# dla ludzi od TS</h2>
 <table>
   <thead><tr><th>C#</th><th>TS/JS odpowiednik</th><th>Uwagi</th></tr></thead>

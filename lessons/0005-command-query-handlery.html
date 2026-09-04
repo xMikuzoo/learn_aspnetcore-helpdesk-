@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>0005 · Command vs Query — ASP.NET Core dla frontendowca</title>
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/quiz.js" defer></script>
+<script src="../assets/checklist.js" defer></script>
+</head>
+<body>
+<div class="page">
+<header class="lesson-head">
+  <div class="kicker">Lekcja 0005 · ~20 min · projekt Helpdesk</div>
+  <h1>Command vs Query: pierwszy własny handler</h1>
+  <p class="subtitle">Cel: wyjąć logikę z lambdy endpointu do osobnej klasy — <code>CreateTicketHandler</code> — i nazwać rzecz po imieniu: <em>command</em> zmienia stan, <em>query</em> tylko czyta. Po drodze pierwszy raz w tym kursie pojawia się <code>async</code>/<code>await</code>. To jest lekcja, po której zaczniesz rozpoznawać kształt firmowego kodu.</p>
+  <p class="meta">Wymaga: <a href="0004-vertical-slices.html">lekcji 0004</a> (<code>Features/Tickets/</code>). Ściąga: <a href="../reference/cqrs-handlers.html">Command / Query — handlery</a>.</p>
+</header>
+
+<h2>Problem: lambda, która puchnie</h2>
+<p>Twój POST wygląda dziś tak:</p>
+<pre><code>tickets.MapPost(<span class="str">"/"</span>, (<span class="ty">CreateTicketRequest</span> request, <span class="ty">ITicketStore</span> store,
+                     <span class="ty">TicketMetrics</span> metrics, <span class="ty">ICurrentUser</span> user) =&gt;
+{
+    <span class="kw">var</span> ticket = store.Add(request.Title);
+    metrics.RecordCreated(user);
+    <span class="kw">return</span> <span class="ty">TypedResults</span>.Created($<span class="str">"/tickets/{ticket.Id}"</span>, ticket);
+});</code></pre>
+<p>Dwie linie logiki — jeszcze czytelne. Ale „utwórz zgłoszenie" w prawdziwym systemie znaczy: zwaliduj tytuł, sprawdź czy użytkownik ma uprawnienia, zapisz, zwiększ metrykę, wyślij powiadomienie na maila, dopisz wpis do audytu. Sześć kroków w lambdzie zarejestrowanej wewnątrz metody rozszerzającej. Nie da się tego przetestować bez podnoszenia serwera, nie da się wywołać z innego miejsca, a <code>MapTickets</code> rośnie do 200 linii.</p>
+<p>Rozwiązanie jest banalne w opisie: <strong>logika idzie do klasy, endpoint tylko ją woła</strong>. Cała lekcja jest o tym, jak ta klasa wygląda w .NET-cie i dlaczego akurat tak.</p>
+
+<h2>Command i Query — dwa słowa, jedna reguła</h2>
+<table>
+  <thead><tr><th></th><th>Command</th><th>Query</th></tr></thead>
+  <tbody>
+    <tr><td>Co robi</td><td>zmienia stan</td><td>czyta stan</td></tr>
+    <tr><td>Twoje endpointy</td><td>POST, PUT, DELETE</td><td>GET</td></tr>
+    <tr><td>Niezmienniki domeny</td><td>tak — walidacja, reguły przejść stanu</td><td>nie ma czego chronić</td></tr>
+    <tr><td>Autoryzacja</td><td colspan="2" style="text-align:center"><strong>tak — po obu stronach, zawsze</strong></td></tr>
+    <tr><td>Zwraca</td><td>minimum (id, potwierdzenie)</td><td>dane w kształcie wygodnym dla UI</td></tr>
+    <tr><td>Można powtórzyć bezkarnie</td><td>nie</td><td>tak</td></tr>
+  </tbody>
+</table>
+<p>To jest <strong>CQRS</strong> — Command Query Responsibility Segregation. Nazwa brzmi ciężko, a w wersji, którą dziś napiszesz, to po prostu dwa interfejsy i konwencja nazewnicza. Wersje ciężkie (osobne bazy do zapisu i odczytu, event sourcing) istnieją, ale nie zaczyna się od nich i twój zespół najpewniej też ich nie ma.</p>
+
+<div class="callout source">
+  „Commands should represent specific business tasks instead of low-level data updates. For example, in a hotel-booking app, use the command <em>Book hotel room</em> instead of <em>Set ReservationStatus to Reserved</em>.” — <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/cqrs">Microsoft, CQRS Pattern</a>. Stąd nazwy: <code>CreateTicketCommand</code>, <code>AssignTicketCommand</code>, <code>CloseTicketCommand</code> — nie <code>UpdateTicketStatusCommand</code>.
+</div>
+
+<h2>Krok 1: dwa interfejsy</h2>
+<p class="filename">project/Helpdesk/Common/Cqrs.cs</p>
+<pre><code><span class="kw">namespace</span> Helpdesk.Common;
+
+<span class="cm">/// &lt;summary&gt;Obsługuje jedną operację zmieniającą stan.&lt;/summary&gt;</span>
+<span class="kw">public interface</span> <span class="ty">ICommandHandler</span>&lt;<span class="kw">in</span> <span class="ty">TCommand</span>, <span class="ty">TResult</span>&gt;
+{
+    <span class="ty">Task</span>&lt;<span class="ty">TResult</span>&gt; HandleAsync(<span class="ty">TCommand</span> command, <span class="ty">CancellationToken</span> cancellationToken = <span class="kw">default</span>);
+}
+
+<span class="cm">/// &lt;summary&gt;Obsługuje jedno zapytanie o dane, bez zmiany stanu.&lt;/summary&gt;</span>
+<span class="kw">public interface</span> <span class="ty">IQueryHandler</span>&lt;<span class="kw">in</span> <span class="ty">TQuery</span>, <span class="ty">TResult</span>&gt;
+{
+    <span class="ty">Task</span>&lt;<span class="ty">TResult</span>&gt; HandleAsync(<span class="ty">TQuery</span> query, <span class="ty">CancellationToken</span> cancellationToken = <span class="kw">default</span>);
+}</code></pre>
+<p>Cztery rzeczy w tych sześciu linijkach:</p>
+<ul>
+  <li><strong><code>&lt;TCommand, TResult&gt;</code> — generyki.</strong> Jak <code>Ref&lt;T&gt;</code> w Vue: klasa parametryzowana typem. Zapis <code>ICommandHandler&lt;CreateTicketCommand, Ticket&gt;</code> czyta się „handler, który przyjmuje <code>CreateTicketCommand</code> i zwraca <code>Ticket</code>”.</li>
+  <li><strong><code>in</code> przed <code>TCommand</code>.</strong> Kontrawariancja — mówi, że typ wchodzi do środka i nigdy nie wychodzi. Na razie nic ci nie daje; wpisz i zapomnij, wróci przy pipeline'ach w lekcji 0007.</li>
+  <li><strong><code>Task&lt;T&gt;</code>.</strong> Odpowiednik <code>Promise&lt;T&gt;</code>. Twój handler jest dziś w pełni synchroniczny, ale <em>interfejs</em> musi być asynchroniczny od początku — w lekcji 0008 wejdzie EF Core i każde `SaveChangesAsync` będzie prawdziwym <code>await</code>. Zmiana sygnatury interfejsu później to przepisanie wszystkich handlerów naraz.</li>
+  <li><strong><code>CancellationToken</code>.</strong> Sygnał „klient rozłączył się, przestań pracować”. Framework wstrzykuje go sam. Odpowiednik <code>AbortSignal</code> z <code>fetch</code>.</li>
+</ul>
+
+<h2>Krok 2: command i jego handler</h2>
+<p>Konwencja vertical slices: <strong>jeden plik na przypadek użycia</strong>, a w nim wszystko, co ten przypadek opisuje.</p>
+<p class="filename">project/Helpdesk/Features/Tickets/CreateTicket.cs</p>
+<pre><code><span class="kw">using</span> Helpdesk.Common;
+
+<span class="kw">namespace</span> Helpdesk.Features.Tickets;
+
+<span class="kw">public record</span> <span class="ty">CreateTicketCommand</span>(<span class="kw">string</span> Title);
+
+<span class="kw">public class</span> <span class="ty">CreateTicketHandler</span>(<span class="ty">ITicketStore</span> store, <span class="ty">TicketMetrics</span> metrics, <span class="ty">ICurrentUser</span> user)
+    : <span class="ty">ICommandHandler</span>&lt;<span class="ty">CreateTicketCommand</span>, <span class="ty">Ticket</span>&gt;
+{
+    <span class="kw">public</span> <span class="ty">Task</span>&lt;<span class="ty">Ticket</span>&gt; HandleAsync(<span class="ty">CreateTicketCommand</span> command, <span class="ty">CancellationToken</span> cancellationToken = <span class="kw">default</span>)
+    {
+        <span class="kw">var</span> ticket = store.Add(command.Title);
+        metrics.RecordCreated(user);
+        <span class="kw">return</span> <span class="ty">Task</span>.FromResult(ticket);
+    }
+}</code></pre>
+<p><code>Task.FromResult(x)</code> to „gotowy <code>Task</code> z wartością w środku”, czyli <code>Promise.resolve(x)</code>. Używasz go, bo <em>nic tu jeszcze nie jest asynchroniczne</em> — nie ma na co czekać. Metoda nie jest oznaczona <code>async</code>, bo nie ma w niej <code>await</code>.</p>
+<div class="callout warn">
+  <strong>Nie rób <code>async</code> bez <code>await</code>.</strong> Kompilator zaakceptuje <code>public async Task&lt;Ticket&gt; HandleAsync(…) { return ticket; }</code>, ale rzuci ostrzeżenie <code>CS1998</code> i wygeneruje maszynę stanów, która nic nie robi. Dopóki nie masz na co czekać — <code>Task.FromResult</code>.
+</div>
+
+<h3>Dlaczego handler może wstrzyknąć <code>ICurrentUser</code></h3>
+<p>W lekcji 0002 wstrzyknięcie Scoped <code>ICurrentUser</code> do Singletona wysadziło aplikację przy starcie. Tutaj jest dokładnie odwrotnie — i to jest w porządku, bo <strong>handler zarejestrujesz jako Scoped</strong>. Scoped wolno zależeć od Scoped i od Singletona; zakazany jest tylko kierunek „długowieczny sięga po krótkowiecznego”.</p>
+<p>Spróbuj zarejestrować handler jako Singleton, a dostaniesz to (sprawdzone):</p>
+<pre><code><span class="cm">System.InvalidOperationException: Cannot consume scoped service
+'Helpdesk.Common.ICurrentUser' from singleton
+'Helpdesk.Common.ICommandHandler`2[CreateTicketCommand,Ticket]'.</span></code></pre>
+<p>Ten sam wyjątek co w lekcji 0002, tylko z twoim własnym typem w środku. <strong>Handlery są Scoped — zawsze.</strong> Żyją tyle, co jedno żądanie, i tyle mają żyć.</p>
+
+<h2>Krok 3: query</h2>
+<p class="filename">project/Helpdesk/Features/Tickets/GetTicket.cs</p>
+<pre><code><span class="kw">using</span> Helpdesk.Common;
+
+<span class="kw">namespace</span> Helpdesk.Features.Tickets;
+
+<span class="kw">public record</span> <span class="ty">GetTicketQuery</span>(<span class="kw">int</span> Id);
+
+<span class="kw">public class</span> <span class="ty">GetTicketHandler</span>(<span class="ty">ITicketStore</span> store) : <span class="ty">IQueryHandler</span>&lt;<span class="ty">GetTicketQuery</span>, <span class="ty">Ticket</span>?&gt;
+{
+    <span class="kw">public</span> <span class="ty">Task</span>&lt;<span class="ty">Ticket</span>?&gt; HandleAsync(<span class="ty">GetTicketQuery</span> query, <span class="ty">CancellationToken</span> cancellationToken = <span class="kw">default</span>)
+        =&gt; <span class="ty">Task</span>.FromResult(store.GetById(query.Id));
+}</code></pre>
+<p>Query nie ma <code>TicketMetrics</code> — i to jest reguła, nie oszczędność: odczyt nie zmienia stanu, więc nie sięga po nic, co coś zmienia. Jeśli zobaczysz query, które zapisuje, nazwa kłamie.</p>
+<p>Nie ma też <code>ICurrentUser</code>, ale to <strong>wyłącznie dlatego, że w tym projekcie zgłoszenia nie mają jeszcze właściciela</strong>. Gdy go dostaną, query będzie go potrzebowało — patrz sekcja niżej.</p>
+<p><code>Ticket?</code> jako <code>TResult</code> jest celowe: „może nie być takiego zgłoszenia” jest częścią kontraktu handlera, a nie czymś, co endpoint sobie dopowiada.</p>
+
+<h2>Autoryzacja dotyczy też query</h2>
+<p>Powyższa tabela mówi, że query nie ma reguł biznesowych — i to jest prawda tylko o <em>niezmiennikach</em>. Autoryzacja to osobna sprawa i obowiązuje po obu stronach. Twoje dzisiejsze API ma tu dziurę: <code>GET /tickets/42</code> odda zgłoszenie każdemu, kto zgadnie liczbę. Ta podatność nazywa się <strong>IDOR</strong> (Insecure Direct Object Reference) i siedzi w OWASP Top 10 jako Broken Access Control.</p>
+<table>
+  <thead><tr><th>Rodzaj autoryzacji</th><th>Pytanie</th><th>Gdzie w kodzie</th></tr></thead>
+  <tbody>
+    <tr><td>deklaratywna</td><td>czy to zalogowany serwisant?</td><td>na trasie: <code>.RequireAuthorization("Agent")</code> na grupie</td></tr>
+    <tr><td>zasobowa</td><td>czy to zgłoszenie należy do tego użytkownika?</td><td>w handlerze — wymaga wczytania danych</td></tr>
+  </tbody>
+</table>
+<p>Drugiej nie da się rozstrzygnąć na poziomie trasy, bo odpowiedź zależy od tego, co leży w bazie pod tym id.</p>
+
+<h3>Filtruj u źródła, nie po fakcie</h3>
+<p>Odruch jest taki:</p>
+<pre><code><span class="kw">var</span> ticket = store.GetById(query.Id);
+<span class="kw">if</span> (ticket.OwnerId != user.Id) <span class="kw">return</span> <span class="kw">null</span>;   <span class="cm">// sprawdzenie po fakcie</span></code></pre>
+<p>Lepszy wzorzec: zapytanie od początku zawężone do tego, co użytkownik ma prawo widzieć.</p>
+<pre><code><span class="kw">public class</span> <span class="ty">GetTicketHandler</span>(<span class="ty">ITicketStore</span> store, <span class="ty">ICurrentUser</span> user)
+    : <span class="ty">IQueryHandler</span>&lt;<span class="ty">GetTicketQuery</span>, <span class="ty">Ticket</span>?&gt;
+{
+    <span class="kw">public</span> <span class="ty">Task</span>&lt;<span class="ty">Ticket</span>?&gt; HandleAsync(<span class="ty">GetTicketQuery</span> query, <span class="ty">CancellationToken</span> ct = <span class="kw">default</span>)
+        =&gt; <span class="ty">Task</span>.FromResult(store.GetVisibleTo(query.Id, user.Name));
+}</code></pre>
+<p>Różnica nie jest kosmetyczna. Przy sprawdzaniu po fakcie każde nowe query to osobna szansa, żeby zapomnieć o <code>if</code>-ie — a zapomniany <code>if</code> nie wywala testu, tylko cicho oddaje cudze dane. Przy filtrowaniu u źródła nie ma czego zapomnieć, bo nie istnieje metoda zwracająca niezawężone dane. Przy EF Core (lekcja 0008) robi to <strong>global query filter</strong>: jedna linia w <code>DbContext</code>, po której każde zapytanie w aplikacji jest zawężone automatycznie.</p>
+
+<div class="callout warn">
+  <strong>404 czy 403?</strong> Gdy ktoś prosi o cudze zgłoszenie, <code>403 Forbidden</code> jest uczciwe, ale <em>potwierdza istnienie zasobu</em> — wystarczy przelecieć id od 1 do 10000, żeby poznać rozmiar systemu i zajęte identyfikatory. Dla danych wrażliwych standardem jest <code>404</code>. Przy filtrowaniu u źródła dostajesz to za darmo: handler zwraca <code>null</code>, endpoint robi <code>TypedResults.NotFound()</code> i w ogóle nie wie, że autoryzacja istnieje.
+</div>
+<p class="sidenote">Mechanika autoryzacji w ASP.NET Core — <code>[Authorize]</code>, polityki, <code>IAuthorizationHandler</code>, resource-based authorization — to osobny temat, poza zakresem kursu na tym etapie. Tutaj chodzi o samo umiejscowienie: <strong>gdzie</strong> ta decyzja zapada, nie <strong>czym</strong> się ją zapisuje.</p>
+
+<h2>Krok 4: rejestracja i endpointy</h2>
+<p>Handler to zwykły serwis — rejestruje się tak jak wszystko inne. W <code>TicketsFeature.AddTickets</code>:</p>
+<pre><code>services.AddScoped&lt;<span class="ty">ICommandHandler</span>&lt;<span class="ty">CreateTicketCommand</span>, <span class="ty">Ticket</span>&gt;, <span class="ty">CreateTicketHandler</span>&gt;();
+services.AddScoped&lt;<span class="ty">IQueryHandler</span>&lt;<span class="ty">GetTicketQuery</span>, <span class="ty">Ticket</span>?&gt;, <span class="ty">GetTicketHandler</span>&gt;();</code></pre>
+<p>I endpointy, które teraz nie wiedzą już nic o <code>ITicketStore</code>:</p>
+<pre><code>tickets.MapPost(<span class="str">"/"</span>,
+    <span class="kw">async</span> (<span class="ty">CreateTicketRequest</span> request,
+           <span class="ty">ICommandHandler</span>&lt;<span class="ty">CreateTicketCommand</span>, <span class="ty">Ticket</span>&gt; handler,
+           <span class="ty">CancellationToken</span> cancellationToken) =&gt;
+    {
+        <span class="kw">var</span> ticket = <span class="kw">await</span> handler.HandleAsync(<span class="kw">new</span> <span class="ty">CreateTicketCommand</span>(request.Title), cancellationToken);
+        <span class="kw">return</span> <span class="ty">TypedResults</span>.Created($<span class="str">"/tickets/{ticket.Id}"</span>, ticket);
+    });
+
+tickets.MapGet(<span class="str">"/{id:int}"</span>,
+    <span class="kw">async</span> <span class="ty">Task</span>&lt;<span class="ty">Results</span>&lt;<span class="ty">Ok</span>&lt;<span class="ty">Ticket</span>&gt;, <span class="ty">NotFound</span>&gt;&gt; (
+        <span class="kw">int</span> id,
+        <span class="ty">IQueryHandler</span>&lt;<span class="ty">GetTicketQuery</span>, <span class="ty">Ticket</span>?&gt; handler,
+        <span class="ty">CancellationToken</span> cancellationToken) =&gt;
+    {
+        <span class="kw">var</span> ticket = <span class="kw">await</span> handler.HandleAsync(<span class="kw">new</span> <span class="ty">GetTicketQuery</span>(id), cancellationToken);
+        <span class="kw">if</span> (ticket <span class="kw">is</span> { } found)
+        {
+            <span class="kw">return</span> <span class="ty">TypedResults</span>.Ok(found);
+        }
+        <span class="kw">return</span> <span class="ty">TypedResults</span>.NotFound();
+    });</code></pre>
+<p>Zwróć uwagę na typ przy GET: <code>async Task&lt;Results&lt;Ok&lt;Ticket&gt;, NotFound&gt;&gt;</code>. Do unii z lekcji 0003 doszło opakowanie w <code>Task</code> — dokładnie tak, jak w TS <code>Ticket | null</code> staje się <code>Promise&lt;Ticket | null&gt;</code>. Kolejność słów jest sztywna: <code>async</code>, typ, lista parametrów, <code>=&gt;</code>.</p>
+<p>Przy POST nie musisz pisać typu jawnie, bo jest tylko jedna gałąź wyniku i kompilator sam go wywnioskuje.</p>
+
+<h3>Co dostajesz w zamian</h3>
+<ul>
+  <li><strong>Testowalność.</strong> <code>new CreateTicketHandler(store, metrics, user).HandleAsync(cmd)</code> — zwykłe wywołanie metody, bez serwera HTTP. To będzie połowa lekcji 0011.</li>
+  <li><strong>Jedno miejsce na regułę.</strong> Walidacja tytułu doda się w handlerze i zadziała niezależnie od tego, ile endpointów go woła.</li>
+  <li><strong>Nazwa zamiast opisu.</strong> <code>CreateTicketCommand</code> w liście plików mówi, co system potrafi. Lambda w środku <code>MapTickets</code> nie mówi nic.</li>
+</ul>
+
+<h2>Diagnostyka: jeden błąd, który zobaczysz na pewno</h2>
+<p>Zapomnisz zarejestrować handler w <code>AddTickets</code> — kod się zbuduje, a POST zwróci <strong>500</strong> z tym w konsoli (sprawdzone):</p>
+<pre><code><span class="cm">System.InvalidOperationException: Failure to infer one or more parameters.
+Below is the list of parameters that we found:
+
+Parameter           | Source
+--------------------------------------------------
+request             | Body (Inferred)
+handler             | UNKNOWN</span></code></pre>
+<p>Ten komunikat jest lepszy, niż się wydaje: pokazuje tabelkę bindera z lekcji 0003 i mówi wprost, którego parametru nie umiał przypisać do żadnego źródła. <code>UNKNOWN</code> przy typie, który miał przyjść z DI, znaczy zawsze jedno — brak rejestracji.</p>
+<div class="callout analogy">
+  Zauważ różnicę w momencie wykrycia: <strong>captive dependency wysadza aplikację przy starcie</strong> (walidacja kontenera w <code>Build()</code>), a <strong>brak rejestracji dopiero przy pierwszym żądaniu</strong> na ten endpoint. Dlatego literówka w rejestracji rzadkiego endpointu potrafi dojechać na produkcję. Test integracyjny, który dotyka każdej trasy, wyłapuje to za darmo — kolejny argument z lekcji 0011.
+</div>
+
+<div class="task">
+  <h3>Zadanie</h3>
+  <ol>
+    <li>Popraw dwie rzeczy z lekcji 0004: <code>namespace Helpdesk.Common;</code> w <code>CommonServices.cs</code> (plus <code>using</code> w <code>Program.cs</code>) i <code>MapDiagnostics(this IEndpointRouteBuilder app)</code> z <code>MapGroup("/diagnostics")</code>.</li>
+    <li>Napisz <code>Common/Cqrs.cs</code> z oboma interfejsami.</li>
+    <li>Napisz <code>Features/Tickets/CreateTicket.cs</code> — command i handler. Zarejestruj jako Scoped i przepnij endpoint POST.</li>
+    <li>Napisz <code>Features/Tickets/GetTicket.cs</code> — query i handler. Przepnij <code>GET /tickets/{id:int}</code>.</li>
+    <li>Sprawdź, że nic się nie zepsuło: POST ma dalej dać 201 z <code>Location</code>, GET istniejącego 200, GET nieistniejącego 404, a w konsoli ma się pojawić linia z metryk.</li>
+    <li><strong>Zobacz oba błędy na własne oczy.</strong> Zmień rejestrację handlera na <code>AddSingleton</code> i uruchom (crash przy starcie). Potem przywróć Scoped, zakomentuj rejestrację i wyślij POST (500 z tabelką bindera).</li>
+    <li><strong>Decyzja projektowa:</strong> <code>TODO(human)</code> w <code>TicketsFeature.cs</code> — co ma zwracać handler operacji, która może się nie udać.</li>
+  </ol>
+  <div class="check">
+    <label><input type="checkbox" id="c1"> <code>Cqrs.cs</code> ma oba interfejsy z <code>Task</code> i <code>CancellationToken</code></label>
+    <label><input type="checkbox" id="c2"> POST i GET po id idą przez handlery; endpointy nie znają <code>ITicketStore</code></label>
+    <label><input type="checkbox" id="c3"> Handlery zarejestrowane jako <strong>Scoped</strong></label>
+    <label><input type="checkbox" id="c4"> Widziałem crash „Cannot consume scoped service” i 500 „Failure to infer”</label>
+    <label><input type="checkbox" id="c5"> Umiem powiedzieć, czym różni się command od query</label>
+    <label><input type="checkbox" id="c6"> Poprawki z lekcji 0004 naniesione, <code>/diagnostics/lifetimes</code> zwraca 200</label>
+  </div>
+</div>
+
+<h2>Sprawdź się</h2>
+<p>Odpowiedz zanim klikniesz. Zła odpowiedź nie zdradza dobrej — spróbuj jeszcze raz.</p>
+
+<div class="quiz" id="q1" data-answer="2">
+  <div class="q">Dlaczego handlery rejestruje się jako Scoped, a nie Singleton?</div>
+  <button class="opt">Bo Singleton nie obsługuje generyków</button>
+  <button class="opt">Bo tworzenie handlera jest kosztowne</button>
+  <button class="opt">Bo zależą od serwisów żądania</button>
+  <div class="why">Handler sięga po <code>ICurrentUser</code>, a docelowo po <code>DbContext</code> — oba Scoped. Singleton nie może konsumować Scoped; kontener wysadza aplikację przy <code>Build()</code> komunikatem „Cannot consume scoped service”. Koszt tworzenia jest tu bez znaczenia.</div>
+</div>
+
+<div class="quiz" id="q2" data-answer="0">
+  <div class="q">Handler nic nie awaituje. Jak zwrócić <code>Task&lt;Ticket&gt;</code>?</div>
+  <button class="opt"><code>Task.FromResult(ticket)</code></button>
+  <button class="opt"><code>await Task.Run(() =&gt; ticket)</code></button>
+  <button class="opt"><code>async</code> i zwykły <code>return</code></button>
+  <div class="why"><code>Task.FromResult</code> to gotowy Task z wartością — <code>Promise.resolve</code>. <code>async</code> bez <code>await</code> daje ostrzeżenie <code>CS1998</code> i niepotrzebną maszynę stanów, a <code>Task.Run</code> dokłada skok na inny wątek puli, żeby wykonać dwie linie synchronicznego kodu.</div>
+</div>
+
+<div class="quiz" id="q3" data-answer="1">
+  <div class="q">Konsola: „Failure to infer one or more parameters”, przy handlerze <code>UNKNOWN</code>. Co to znaczy?</div>
+  <button class="opt">Endpoint ma zły szablon trasy</button>
+  <button class="opt">Serwis nie jest zarejestrowany w DI</button>
+  <button class="opt">Ciało żądania ma zły Content-Type</button>
+  <div class="why">Binder szuka źródła dla każdego parametru. Typ złożony spoza kontenera trafiłby do body, ale body jest już zajęte przez pierwszy parametr — zostaje <code>UNKNOWN</code>. Praktycznie zawsze znaczy to brakującą linię <code>AddScoped</code>.</div>
+</div>
+
+<div class="quiz" id="q4" data-answer="2">
+  <div class="q">Które z tych to <em>command</em>, a nie query?</div>
+  <button class="opt">Policz otwarte zgłoszenia użytkownika</button>
+  <button class="opt">Pobierz listę zgłoszeń ze statusem</button>
+  <button class="opt">Przypisz zgłoszenie do serwisanta</button>
+  <div class="why">Command zmienia stan systemu; dwa pozostałe tylko czytają, choćby wymagały skomplikowanego zapytania. Kryterium to skutek uboczny, nie złożoność. Nazwa dobrego commanda opisuje zadanie biznesowe („przypisz”), nie operację na danych („ustaw pole AssignedTo”).</div>
+</div>
+
+<div class="quiz" id="q5" data-answer="1">
+  <div class="q">Użytkownik prosi o cudze zgłoszenie po id. Co zwrócić?</div>
+  <button class="opt">403, bo zasób jednak istnieje</button>
+  <button class="opt">404, bo nie istnieje dla niego</button>
+  <button class="opt">200 z okrojonym zestawem pól</button>
+  <div class="why">403 potwierdza istnienie zasobu — wystarczy przelecieć kolejne id, żeby poznać rozmiar systemu. 404 nie wycieka nic i wychodzi naturalnie, gdy query jest zawężone u źródła: handler nic nie znalazł, więc endpoint zwraca „nie ma”. Okrojony zestaw pól to nadal wyciek: potwierdza istnienie.</div>
+</div>
+
+<details class="recall">
+  <summary>Czym różni się command od query — w jednym zdaniu?</summary>
+  <p>Command zmienia stan i niesie reguły biznesowe; query tylko czyta i nie ma prawa niczego zmienić. Stąd reszta różnic: query wolno powtórzyć bezkarnie, command nie.</p>
+</details>
+
+<details class="recall">
+  <summary>Po co interfejs handlera jest asynchroniczny, skoro implementacja nie jest?</summary>
+  <p>Bo przy EF Core (lekcja 0008) każdy zapis stanie się prawdziwym <code>await</code>. Zmiana sygnatury interfejsu później oznacza przepisanie wszystkich handlerów i wszystkich endpointów naraz. <code>Task.FromResult</code> to koszt jednej linii dzisiaj zamiast refactoru jutro.</p>
+</details>
+
+<details class="recall">
+  <summary>Query nie ma reguł biznesowych — czy to znaczy, że nie sprawdza uprawnień?</summary>
+  <p>Nie. Bez reguł jest tylko wobec <em>niezmienników</em> — odczyt niczego nie psuje, więc nie ma czego chronić. Autoryzacja obowiązuje tak samo po stronie odczytu; jej brak to IDOR. Wzorzec: zawężaj zapytanie u źródła, nie sprawdzaj własności po wczytaniu, i zwracaj 404 zamiast 403, żeby nie potwierdzać istnienia zasobu.</p>
+</details>
+
+<details class="recall">
+  <summary>Kiedy kontener wykrywa captive dependency, a kiedy brak rejestracji?</summary>
+  <p>Captive dependency — przy starcie, w <code>builder.Build()</code>, bo walidacja przechodzi po wszystkich deskryptorach. Brak rejestracji — dopiero przy pierwszym żądaniu na dany endpoint, bo dopiero wtedy binder próbuje wypełnić parametry.</p>
+</details>
+
+<h2>Źródło pierwotne</h2>
+<div class="callout source">
+  <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/cqrs">Microsoft — CQRS Pattern</a> (ok. 10 min). Czytaj <em>Solution</em> i <em>When to use this pattern</em>; sekcje o osobnych bazach i Event Sourcing przejrzyj pobieżnie — to wersja, której twój zespół prawie na pewno nie używa, ale warto wiedzieć, że istnieje, bo stamtąd biorą się zdania o „eventual consistency”. Zapamiętaj sam akapit o nazywaniu commandów zadaniami biznesowymi.
+</div>
+
+<div class="callout ask">Coś nie działa — 500 przy POST, „Cannot consume scoped service”, kompilator nie widzi <code>ICommandHandler</code>? Wklej to nauczycielowi w terminalu (Claude Code w <code>C:\PLAYGROUND\asp</code>). Pytanie do zespołu: <em>„czy nasze handlery zwracają wynik, czy rzucają wyjątkiem, gdy operacja się nie uda?”</em> — to jest dokładnie decyzja z zadania 7 i każdy zespół rozstrzyga ją inaczej.</div>
+
+<h2>Co dalej</h2>
+<p>Masz handlery, ale wołasz je ręcznie: endpoint wstrzykuje konkretny <code>ICommandHandler&lt;CreateTicketCommand, Ticket&gt;</code> i sam składa command. Przy dwudziestu przypadkach użycia to dwadzieścia różnych typów wstrzykiwanych w dwudziestu miejscach — i nie ma gdzie wpiąć czegoś, co ma się dziać <em>przy każdym</em> commandzie: logowania, walidacji, transakcji. Lekcja 0006: <strong>dispatcher</strong> — jeden <code>ISender</code>, któremu podajesz command, a on znajduje właściwy handler. Napiszesz go sam, żeby zobaczyć, że to trzydzieści linii refleksji, a dopiero potem podmienimy go na MediatR — bibliotekę, którą czytasz w firmowym repo.</p>
+
+<nav class="lesson-nav">
+  <a href="0004-vertical-slices.html">← Lekcja 0004</a>
+  <a href="../reference/cqrs-handlers.html">Ściąga: Handlery</a>
+  <a href="../reference/glossary.html">Glossary</a>
+</nav>
+</div>
+</body>
+</html>

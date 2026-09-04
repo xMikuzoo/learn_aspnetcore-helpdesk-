@@ -9,6 +9,10 @@ public static class TicketsFeature
     {
         services.AddSingleton<ITicketStore, InMemoryTicketStore>();
         services.AddSingleton<TicketMetrics>();
+
+        services.AddScoped<ICommandHandler<CreateTicketCommand, Ticket>, CreateTicketHandler>();
+        services.AddScoped<IQueryHandler<GetTicketQuery, Ticket?>, GetTicketHandler>();
+
         return services;
     }
 
@@ -19,20 +23,25 @@ public static class TicketsFeature
         tickets.MapGet("/", (ITicketStore store) => store.GetAll());
 
         tickets.MapGet("/{id:int}",
-            Results<Ok<Ticket>, NotFound> (int id, ITicketStore store) =>
+            async Task<Results<Ok<Ticket>, NotFound>> (
+                int id,
+                IQueryHandler<GetTicketQuery, Ticket?> handler,
+                CancellationToken cancellationToken) =>
             {
-                if (store.GetById(id) is { } ticket)
+                var ticket = await handler.HandleAsync(new GetTicketQuery(id), cancellationToken);
+                if (ticket is { } found)
                 {
-                    return TypedResults.Ok(ticket);
+                    return TypedResults.Ok(found);
                 }
                 return TypedResults.NotFound();
             });
 
         tickets.MapPost("/",
-            (CreateTicketRequest request, ITicketStore store, TicketMetrics metrics, ICurrentUser user) =>
+            async (CreateTicketRequest request,
+                ICommandHandler<CreateTicketCommand, Ticket> handler,
+                CancellationToken cancellationToken) =>
             {
-                var ticket = store.Add(request.Title);
-                metrics.RecordCreated(user);
+                var ticket = await handler.HandleAsync(new CreateTicketCommand(request.Title), cancellationToken);
                 return TypedResults.Created($"/tickets/{ticket.Id}", ticket);
             });
 
@@ -62,5 +71,3 @@ public static class TicketsFeature
     }
 
 }
-
-// TODO(human): co zwraca handler operacji, ktora moze sie nie udac (lekcja 0005, zadanie 7)
