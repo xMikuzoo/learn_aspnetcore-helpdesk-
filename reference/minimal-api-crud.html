@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Minimal API — ściąga: routing, binding, wyniki</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<div class="page">
+<header class="lesson-head">
+  <div class="kicker">Reference · Minimal API</div>
+  <h1>Routing, binding i wyniki HTTP</h1>
+  <p class="subtitle">Ściąga do druku. Oparta na <a href="https://learn.microsoft.com/en-us/aspnet/core/fundamentals/minimal-apis/responses?view=aspnetcore-10.0">How to create responses in Minimal API apps</a> i <a href="https://learn.microsoft.com/en-us/aspnet/core/fundamentals/routing?view=aspnetcore-10.0#route-groups">Route groups</a>; wszystkie kody statusu zweryfikowane curlem na .NET 10.0.400.</p>
+  <p class="meta">Ćwiczone w <a href="../lessons/0003-crud-typedresults.html">lekcji 0003</a>.</p>
+</header>
+
+<h2>Skąd handler bierze parametr</h2>
+<p>Minimal API rozstrzyga to <strong>po typie i nazwie</strong>, w tej kolejności:</p>
+<table>
+  <thead><tr><th>Parametr</th><th>Źródło</th><th>Warunek</th></tr></thead>
+  <tbody>
+    <tr><td><code>ITicketStore store</code></td><td>kontener DI</td><td>typ zarejestrowany w <code>builder.Services</code></td></tr>
+    <tr><td><code>int id</code></td><td>trasa</td><td>nazwa zgadza się z <code>{id}</code> w szablonie</td></tr>
+    <tr><td><code>string title</code></td><td>query string</td><td>typ prosty, brak dopasowania w trasie</td></tr>
+    <tr><td><code>CreateTicketRequest r</code></td><td>ciało żądania (JSON)</td><td>typ złożony, niezarejestrowany w DI</td></tr>
+    <tr><td><code>HttpContext ctx</code></td><td>framework</td><td>typy specjalne: <code>HttpRequest</code>, <code>CancellationToken</code>, <code>ClaimsPrincipal</code></td></tr>
+  </tbody>
+</table>
+<p>Atrybuty (<code>[FromRoute]</code>, <code>[FromQuery]</code>, <code>[FromBody]</code>, <code>[FromServices]</code>) są potrzebne tylko wtedy, gdy chcesz nadpisać tę regułę. Kolejność parametrów nie ma znaczenia.</p>
+
+<h2>Ograniczenia trasy (route constraints)</h2>
+<pre><code>app.MapGet(<span class="str">"/tickets/{id:int}"</span>, …)                <span class="cm">// tylko liczby całkowite</span>
+app.MapGet(<span class="str">"/tickets/{id:int:min(1)}"</span>, …)         <span class="cm">// i to dodatnie</span>
+app.MapGet(<span class="str">"/posts/{slug:regex(^[a-z0-9-]+$)}"</span>, …) <span class="cm">// wzorzec</span></code></pre>
+<div class="callout">
+  <strong>Ograniczenie zmienia kod odpowiedzi.</strong> Bez <code>:int</code> żądanie <code>/tickets/abc</code> pasuje do trasy, ale binding się wywraca → <strong>400 Bad Request</strong>. Z <code>:int</code> żądanie w ogóle nie pasuje do żadnej trasy → <strong>404 Not Found</strong>. Oba zweryfikowane. Dla API zwykle chcesz 404: „nie ma takiego zasobu” jest prawdziwsze niż „źle sformułowałeś żądanie”.
+</div>
+
+<h2>Grupy tras</h2>
+<pre><code><span class="kw">var</span> tickets = app.MapGroup(<span class="str">"/tickets"</span>);
+
+tickets.MapGet(<span class="str">"/"</span>, …);          <span class="cm">// GET  /tickets</span>
+tickets.MapGet(<span class="str">"/{id:int}"</span>, …);  <span class="cm">// GET  /tickets/42</span>
+tickets.MapPost(<span class="str">"/"</span>, …);         <span class="cm">// POST /tickets</span></code></pre>
+<p><code>MapGroup</code> zwraca <code>RouteGroupBuilder</code>. Wywołane na nim <code>.RequireAuthorization()</code>, <code>.WithTags("Tickets")</code> czy <code>.AddEndpointFilter(…)</code> dotyczy <strong>wszystkich</strong> endpointów w grupie. Grupy można zagnieżdżać.</p>
+
+<h2><code>Results</code> vs <code>TypedResults</code></h2>
+<table>
+  <thead><tr><th></th><th><code>Results.Ok(x)</code></th><th><code>TypedResults.Ok(x)</code></th></tr></thead>
+  <tbody>
+    <tr><td>Typ zwracany</td><td><code>IResult</code></td><td><code>Ok&lt;T&gt;</code> (konkretny)</td></tr>
+    <tr><td>Metadane OpenAPI</td><td>trzeba dopisać <code>.Produces&lt;T&gt;(200)</code></td><td>automatyczne</td></tr>
+    <tr><td>Test jednostkowy</td><td>trzeba rzutować</td><td><code>Assert.Equal(200, result.StatusCode)</code></td></tr>
+    <tr><td>Dwa różne wyniki w jednym handlerze</td><td>działa samo</td><td>trzeba zadeklarować <code>Results&lt;T1, T2&gt;</code></td></tr>
+  </tbody>
+</table>
+<p>Docs mówią wprost: „Returning <code>TypedResults</code> is preferred to returning <code>Results</code>”.</p>
+
+<h3>Dwa możliwe wyniki — składnia</h3>
+<pre><code><span class="kw">using</span> Microsoft.AspNetCore.Http.HttpResults;
+
+tickets.MapGet(<span class="str">"/{id:int}"</span>,
+    <span class="ty">Results</span>&lt;<span class="ty">Ok</span>&lt;<span class="ty">Ticket</span>&gt;, <span class="ty">NotFound</span>&gt; (<span class="kw">int</span> id, <span class="ty">ITicketStore</span> store) =&gt;
+        store.GetById(id) <span class="kw">is</span> { } ticket
+            ? <span class="ty">TypedResults</span>.Ok(ticket)
+            : <span class="ty">TypedResults</span>.NotFound());</code></pre>
+<p>Typ zwracany stoi <strong>przed</strong> listą parametrów lambdy — to jedyne miejsce w C#, gdzie zobaczysz taką składnię. Bez tego kompilator nie potrafi znaleźć wspólnego typu dla <code>Ok&lt;Ticket&gt;</code> i <code>NotFound</code>, bo to dwie niepowiązane klasy.</p>
+
+<h2>Kody statusu, których użyjesz</h2>
+<table>
+  <thead><tr><th>Sytuacja</th><th>Kod</th><th>Wywołanie</th><th>Ciało</th></tr></thead>
+  <tbody>
+    <tr><td>GET zasobu / kolekcji</td><td>200</td><td><code>TypedResults.Ok(x)</code></td><td>zasób</td></tr>
+    <tr><td>POST utworzył zasób</td><td>201</td><td><code>TypedResults.Created($"/tickets/{id}", x)</code></td><td>zasób + nagłówek <code>Location</code></td></tr>
+    <tr><td>PUT / DELETE się udał</td><td>204</td><td><code>TypedResults.NoContent()</code></td><td>puste</td></tr>
+    <tr><td>Nie ma takiego zasobu</td><td>404</td><td><code>TypedResults.NotFound()</code></td><td>puste</td></tr>
+    <tr><td>Żądanie niepoprawne</td><td>400</td><td><code>TypedResults.BadRequest(x)</code></td><td>opis błędu</td></tr>
+    <tr><td>Błąd walidacji</td><td>400</td><td><code>TypedResults.ValidationProblem(errors)</code></td><td>ProblemDetails (lekcja 0007)</td></tr>
+    <tr><td>Konflikt stanu</td><td>409</td><td><code>TypedResults.Conflict(x)</code></td><td>opis</td></tr>
+  </tbody>
+</table>
+<div class="callout">
+  <strong>201 vs 200 przy POST.</strong> 201 mówi klientowi „powstał nowy zasób i znajdziesz go pod tym adresem” — adres idzie w nagłówku <code>Location</code>, nie w ciele. Frontend może po nim od razu przejść do szczegółów. 200 nie niesie tej informacji.
+</div>
+<div class="callout">
+  <strong>204 vs 200 przy PUT/DELETE.</strong> 204 = „udało się, nie mam ci nic do pokazania”. Ciało <em>musi</em> być puste — <code>fetch()</code> na 204 nie ma czego zdeserializować, więc <code>res.json()</code> po stronie frontendu rzuci wyjątkiem. To najczęstsze zderzenie frontu z backendem przy DELETE.
+</div>
+
+<h2>Stan w singletonie: <code>lock</code></h2>
+<p>Serwis Singleton obsługuje żądania równolegle, na różnych wątkach. <code>List&lt;T&gt;</code> i <code>Dictionary&lt;K,V&gt;</code> nie są thread-safe — równoczesny zapis potrafi je fizycznie uszkodzić albo rzucić <code>IndexOutOfRangeException</code> w losowym miejscu.</p>
+<pre><code><span class="kw">public class</span> <span class="ty">InMemoryTicketStore</span> : <span class="ty">ITicketStore</span>
+{
+    <span class="kw">private readonly</span> <span class="ty">Lock</span> _gate = <span class="kw">new</span>();   <span class="cm">// System.Threading.Lock, .NET 9+</span>
+    <span class="kw">private readonly</span> <span class="ty">List</span>&lt;<span class="ty">Ticket</span>&gt; _tickets = [ … ];
+
+    <span class="kw">public</span> <span class="ty">IReadOnlyList</span>&lt;<span class="ty">Ticket</span>&gt; GetAll()
+    {
+        <span class="kw">lock</span> (_gate) <span class="kw">return</span> _tickets.ToList();   <span class="cm">// kopia — patrz niżej</span>
+    }
+}</code></pre>
+<ul>
+  <li><strong>Osłaniaj też odczyt.</strong> Czytanie listy w trakcie cudzego zapisu to wyścig, nie tylko zapis równoległy.</li>
+  <li><strong>Zwracaj kopię</strong> (<code>.ToList()</code>). Bez tego oddajesz referencję do żywej listy i wołający iteruje ją poza <code>lock</code> — klasyczne <code>InvalidOperationException: Collection was modified</code>.</li>
+  <li><strong>Sam licznik</strong> (<code>_created++</code>) wystarczy opakować w <code>Interlocked.Increment(<span class="kw">ref</span> _created)</code> — taniej niż lock.</li>
+  <li>Alternatywa dla całych kolekcji: <code>System.Collections.Concurrent</code> (<code>ConcurrentDictionary</code>).</li>
+</ul>
+<p>Przy EF Core (lekcja 0008) problem znika u źródła: <code>DbContext</code> jest Scoped, więc każde żądanie ma własny i nie ma czego blokować.</p>
+
+<nav class="lesson-nav">
+  <a href="glossary.html">← Glossary</a>
+  <a href="di-lifetimes.html">Ściąga: DI</a>
+  <a href="../lessons/0003-crud-typedresults.html">Lekcja 0003 →</a>
+</nav>
+</div>
+</body>
+</html>

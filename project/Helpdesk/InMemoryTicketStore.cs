@@ -1,18 +1,59 @@
 public class InMemoryTicketStore : ITicketStore
 {
+    private readonly Lock _gate = new();
     private readonly List<Ticket> _tickets = [
         new  Ticket(1,"Pierwsze zgłoszenie"),
         new  Ticket(2,"Drugie zgłoszenie!"),
     ];
 
-    public IReadOnlyList<Ticket> GetAll() => _tickets;
+    private int GenerateId() =>
+        _tickets.Count == 0 ? 1 : _tickets.Max(t => t.Id) + 1;
 
-    public Ticket? GetById(int id) => _tickets.FirstOrDefault(t => t.Id == id);
+    public IReadOnlyList<Ticket> GetAll()
+    {
+        lock (_gate)
+        {
+            return _tickets.ToList();
+        }
+    }
+
+    public Ticket? GetById(int id)
+    {
+        lock (_gate)
+        {
+            return _tickets.FirstOrDefault(t => t.Id == id);
+        }
+    }
 
     public Ticket Add(string title)
     {
-        var ticket = new Ticket(_tickets.Count + 1, title);
-        _tickets.Add(ticket);
-        return ticket;
+        lock (_gate)
+        {
+            var ticket = new Ticket(GenerateId(), title);
+            _tickets.Add(ticket);
+            return ticket;
+        }
+    }
+
+    public bool Update(int id, string title)
+    {
+        lock (_gate)
+        {
+            var index = _tickets.FindIndex(t => t.Id == id);
+            if (index < 0)
+            {
+                return false;
+            }
+            _tickets[index] = _tickets[index] with { Title = title };
+            return true;
+        }
+    }
+
+    public bool Delete(int id)
+    {
+        lock (_gate)
+        {
+            return _tickets.RemoveAll(t => t.Id == id) > 0;
+        }
     }
 }

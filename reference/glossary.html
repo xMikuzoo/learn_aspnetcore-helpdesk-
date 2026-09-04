@@ -67,6 +67,28 @@
   <dd>Błąd: Singleton dostaje wstrzyknięty Scoped/Transient i trzyma go na zawsze. Kontener w trybie Development rzuca wyjątek, żeby to wyłapać.</dd>
 </dl>
 
+<h2>Minimal API — routing i wyniki</h2>
+<p>Rozwinięcie: <a href="minimal-api-crud.html">ściąga — routing, binding, wyniki HTTP</a>. Ćwiczone w <a href="../lessons/0003-crud-typedresults.html">lekcji 0003</a>.</p>
+<dl class="glossary">
+  <dt>Model binding <span class="pl">— wiązanie parametrów</span></dt>
+  <dd>Reguła, po której framework wypełnia argumenty handlera. Kolejno: typ zarejestrowany w DI → kontener; nazwa zgodna z <code>{…}</code> w trasie → trasa; typ prosty → query string; typ złożony spoza DI → ciało żądania (JSON).</dd>
+
+  <dt>Route constraint <span class="pl">— ograniczenie trasy</span></dt>
+  <dd>Warunek dopisany do parametru trasy: <code>{id:int}</code>, <code>{id:int:min(1)}</code>. Niepasujące żądanie nie trafia do endpointu — dostaje 404 zamiast 400.</dd>
+
+  <dt>Route group <span class="pl">— grupa tras</span></dt>
+  <dd><code>app.MapGroup("/tickets")</code> zwraca <code>RouteGroupBuilder</code>: wspólny prefiks plus jedno miejsce na <code>RequireAuthorization()</code>, tagi OpenAPI czy filtry dla wszystkich endpointów w grupie.</dd>
+
+  <dt>IResult</dt>
+  <dd>Interfejs opisujący odpowiedź HTTP („umiem się zapisać do <code>HttpResponse</code>”). Handler zwraca <em>opis</em> odpowiedzi, framework go wykonuje — dzięki temu handler jest czystą funkcją i da się go testować bez HTTP.</dd>
+
+  <dt>Results vs TypedResults</dt>
+  <dd>Dwie klasy statyczne z tymi samymi pomocnikami. <code>Results.Ok(x)</code> zwraca <code>IResult</code>, <code>TypedResults.Ok(x)</code> zwraca konkretny <code>Ok&lt;T&gt;</code>. Konkretny typ daje metadane OpenAPI bez <code>.Produces()</code> i testy bez rzutowania — docs preferują <code>TypedResults</code>.</dd>
+
+  <dt>Results&lt;T1, T2&gt; <span class="pl">— unia wyników</span></dt>
+  <dd>Jawny typ zwracany lambdy, gdy handler może oddać dwa różne <code>TypedResults</code>: <code>Results&lt;Ok&lt;Ticket&gt;, NotFound&gt; (int id, …) =&gt; …</code>. Bez tego kompilator nie znajdzie wspólnego typu dla gałęzi ternary.</dd>
+</dl>
+
 <h2>Architektura</h2>
 <dl class="glossary">
   <dt>Vertical slice <span class="pl">— pionowy wycinek</span></dt>

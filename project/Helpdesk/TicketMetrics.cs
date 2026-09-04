@@ -7,7 +7,7 @@ public class TicketMetrics
 
     public void RecordCreated(ICurrentUser user)
     {
-        _created++;
-        Console.WriteLine($"[metrics] {user.Name} utworzyl zgloszenie; lacznie od startu: {_created}");
+        var total = Interlocked.Increment(ref _created);
+        Console.WriteLine($"[metrics] {user.Name} utworzyl zgloszenie; lacznie od startu: {total}");
     }
 }

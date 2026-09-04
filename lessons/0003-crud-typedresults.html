@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>0003 · CRUD i TypedResults — ASP.NET Core dla frontendowca</title>
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/quiz.js" defer></script>
+<script src="../assets/checklist.js" defer></script>
+</head>
+<body>
+<div class="page">
+<header class="lesson-head">
+  <div class="kicker">Lekcja 0003 · ~20 min · projekt Helpdesk</div>
+  <h1>Pełny CRUD: ciało żądania, kody statusu, grupy tras</h1>
+  <p class="subtitle">Cel: domknąć <code>/tickets</code> jako prawdziwe API — POST z JSON-em zamiast query stringa, 201 z nagłówkiem <code>Location</code>, 204 przy PUT i DELETE, i jedna grupa tras zamiast powtarzanego prefiksu. Po tej lekcji <code>Program.cs</code> będzie na tyle długi, że zaczniesz chcieć go rozbić — o tym jest lekcja 0004.</p>
+  <p class="meta">Wymaga: <a href="0002-di-lifetimes.html">lekcji 0002</a> (<code>ITicketStore</code> w DI). Ściąga: <a href="../reference/minimal-api-crud.html">Minimal API — routing, binding, wyniki</a>.</p>
+</header>
+
+<h2>Trzy rzeczy, które są dziś nie tak</h2>
+<p>Twoje endpointy działają, ale kłamią klientowi. Konkretnie:</p>
+<table>
+  <thead><tr><th>Teraz</th><th>Problem</th></tr></thead>
+  <tbody>
+    <tr><td><code>POST /tickets?title=Test</code></td><td>Dane wejściowe w URL-u. Trafiają do logów serwera i historii przeglądarki, nie da się wysłać zagnieżdżonego obiektu, a znaki specjalne trzeba kodować.</td></tr>
+    <tr><td>POST zwraca <code>200 OK</code></td><td>Klient nie wie, że powstał <em>nowy</em> zasób ani pod jakim adresem go szukać.</td></tr>
+    <tr><td>Prefiks <code>/tickets</code> w każdej linii</td><td>Cztery kopie tego samego stringa. Zmiana na <code>/api/tickets</code> to cztery edycje i jedna szansa na literówkę.</td></tr>
+  </tbody>
+</table>
+
+<h2>Krok 1: ciało żądania zamiast query stringa</h2>
+<p>Dodaj plik z dwoma typami — to <strong>DTO</strong>, obiekty opisujące kształt żądania:</p>
+<p class="filename">project/Helpdesk/TicketRequests.cs</p>
+<pre><code><span class="kw">public record</span> <span class="ty">CreateTicketRequest</span>(<span class="kw">string</span> Title);
+<span class="kw">public record</span> <span class="ty">UpdateTicketRequest</span>(<span class="kw">string</span> Title);</code></pre>
+<p>Teraz w handlerze bierzesz je zamiast <code>string title</code>:</p>
+<pre><code>app.MapPost(<span class="str">"/tickets"</span>, (<span class="ty">CreateTicketRequest</span> request, <span class="ty">ITicketStore</span> store) =&gt; …);</code></pre>
+<p>Nie musisz nic konfigurować — <strong>typ złożony, którego nie ma w kontenerze DI, jest deserializowany z ciała żądania jako JSON</strong>. To domyślna reguła bindera, ta sama, która w lekcji 0002 kazała mu sięgnąć do kontenera po <code>ITicketStore</code>. Pełna tabelka źródeł jest w <a href="../reference/minimal-api-crud.html">ściądze</a>.</p>
+
+<div class="callout warn">
+  <strong>Dlaczego dwa niemal identyczne rekordy?</strong> Bo za chwilę zaczną się różnić. <code>CreateTicketRequest</code> nigdy nie dostanie <code>Id</code> (serwer je nadaje), a <code>UpdateTicketRequest</code> prędzej czy później dostanie <code>Status</code> albo <code>AssignedTo</code>. Gdyby oba endpointy przyjmowały <code>Ticket</code>, klient mógłby przysłać własne <code>Id</code> i nadpisać cudze zgłoszenie. Rozdzielanie DTO od encji to nie ceremoniał — to granica zaufania.
+</div>
+
+<h2>Krok 2: <code>TypedResults</code> i prawdziwe kody statusu</h2>
+<p>Do tej pory używałeś <code>Results.Ok()</code> i <code>Results.NotFound()</code>. Ich typ zwracany to <code>IResult</code> — czyli „coś, co umie zapisać odpowiedź”. <code>TypedResults</code> zwraca konkretne typy: <code>Ok&lt;Ticket&gt;</code>, <code>NotFound</code>, <code>Created&lt;Ticket&gt;</code>. Dokumentacja mówi wprost, że są preferowane.<sup class="n">1</sup></p>
+<p class="sidenote"><span class="n">1</span> „Returning <code>TypedResults</code> is preferred to returning <code>Results</code>” — <a href="https://learn.microsoft.com/en-us/aspnet/core/fundamentals/minimal-apis/responses?view=aspnetcore-10.0#built-in-results">Built-in results</a>. Powody: metadane dla OpenAPI powstają same i da się testować bez rzutowania.</p>
+
+<p>Jest jeden haczyk. To się <strong>nie skompiluje</strong>:</p>
+<pre><code>app.MapGet(<span class="str">"/tickets/{id:int}"</span>, (<span class="kw">int</span> id, <span class="ty">ITicketStore</span> store) =&gt;
+    store.GetById(id) <span class="kw">is</span> { } t ? <span class="ty">TypedResults</span>.Ok(t) : <span class="ty">TypedResults</span>.NotFound());</code></pre>
+<p><code>Ok&lt;Ticket&gt;</code> i <code>NotFound</code> to dwie niepowiązane klasy — ternary nie ma wspólnego typu do wybrania. Przy <code>Results.*</code> problemu nie było, bo oba zwracały <code>IResult</code>. Rozwiązanie: <strong>zadeklaruj typ zwracany lambdy jawnie</strong>:</p>
+<pre><code><span class="kw">using</span> Microsoft.AspNetCore.Http.HttpResults;   <span class="cm">// na górze Program.cs</span>
+
+app.MapGet(<span class="str">"/tickets/{id:int}"</span>,
+    <span class="ty">Results</span>&lt;<span class="ty">Ok</span>&lt;<span class="ty">Ticket</span>&gt;, <span class="ty">NotFound</span>&gt; (<span class="kw">int</span> id, <span class="ty">ITicketStore</span> store) =&gt;
+        store.GetById(id) <span class="kw">is</span> { } ticket
+            ? <span class="ty">TypedResults</span>.Ok(ticket)
+            : <span class="ty">TypedResults</span>.NotFound());</code></pre>
+<p>Typ stoi <em>przed</em> nawiasem z parametrami — jedyne miejsce w C#, gdzie zobaczysz taką składnię przy lambdzie. Czyta się to jak sygnaturę: „ten endpoint zwraca albo 200 z <code>Ticket</code>, albo 404”. Frontendowo: to jest <code>Promise&lt;Ticket | null&gt;</code> zapisane w typie, a nie w komentarzu.</p>
+<p><code>is { } ticket</code> to skrót od „nie jest nullem — i nazwij to <code>ticket</code>”. Zastępuje <code>var t = …; if (t is not null)</code>.</p>
+
+<h2>Krok 3: komplet operacji</h2>
+<p>Dołóż do <code>ITicketStore</code> dwie metody. Zwracają <code>bool</code> — „udało się / nie było takiego”:</p>
+<pre><code><span class="kw">bool</span> Update(<span class="kw">int</span> id, <span class="kw">string</span> title);
+<span class="kw">bool</span> Delete(<span class="kw">int</span> id);</code></pre>
+<p>W <code>InMemoryTicketStore</code>:</p>
+<pre><code><span class="kw">public</span> <span class="kw">bool</span> Update(<span class="kw">int</span> id, <span class="kw">string</span> title)
+{
+    <span class="kw">var</span> index = _tickets.FindIndex(t =&gt; t.Id == id);
+    <span class="kw">if</span> (index &lt; 0) <span class="kw">return</span> <span class="kw">false</span>;
+    _tickets[index] = _tickets[index] <span class="kw">with</span> { Title = title };
+    <span class="kw">return</span> <span class="kw">true</span>;
+}
+
+<span class="kw">public</span> <span class="kw">bool</span> Delete(<span class="kw">int</span> id) =&gt; _tickets.RemoveAll(t =&gt; t.Id == id) &gt; 0;</code></pre>
+<p><code>_tickets[index] with { Title = title }</code> to <strong>with-expression</strong>: tworzy kopię rekordu ze zmienionym jednym polem. Dokładnie jak <code>{ ...ticket, title }</code> w JS. Rekord jest niezmienny, więc nie da się przypisać do <code>ticket.Title</code> — trzeba podmienić cały obiekt w liście.</p>
+
+<h2>Krok 4: grupa tras</h2>
+<p>Na koniec sprzątanie. Zamiast czterech razy <code>"/tickets…"</code>:</p>
+<pre><code><span class="kw">var</span> tickets = app.MapGroup(<span class="str">"/tickets"</span>);
+
+tickets.MapGet(<span class="str">"/"</span>, (<span class="ty">ITicketStore</span> store) =&gt; <span class="ty">TypedResults</span>.Ok(store.GetAll()));
+
+tickets.MapGet(<span class="str">"/{id:int}"</span>,
+    <span class="ty">Results</span>&lt;<span class="ty">Ok</span>&lt;<span class="ty">Ticket</span>&gt;, <span class="ty">NotFound</span>&gt; (<span class="kw">int</span> id, <span class="ty">ITicketStore</span> store) =&gt;
+        store.GetById(id) <span class="kw">is</span> { } ticket ? <span class="ty">TypedResults</span>.Ok(ticket) : <span class="ty">TypedResults</span>.NotFound());
+
+tickets.MapPost(<span class="str">"/"</span>, (<span class="ty">CreateTicketRequest</span> request, <span class="ty">ITicketStore</span> store,
+                     <span class="ty">TicketMetrics</span> metrics, <span class="ty">ICurrentUser</span> user) =&gt;
+{
+    <span class="kw">var</span> ticket = store.Add(request.Title);
+    metrics.RecordCreated(user);
+    <span class="kw">return</span> <span class="ty">TypedResults</span>.Created($<span class="str">"/tickets/{ticket.Id}"</span>, ticket);
+});
+
+tickets.MapPut(<span class="str">"/{id:int}"</span>,
+    <span class="ty">Results</span>&lt;<span class="ty">NoContent</span>, <span class="ty">NotFound</span>&gt; (<span class="kw">int</span> id, <span class="ty">UpdateTicketRequest</span> request, <span class="ty">ITicketStore</span> store) =&gt;
+        store.Update(id, request.Title) ? <span class="ty">TypedResults</span>.NoContent() : <span class="ty">TypedResults</span>.NotFound());
+
+tickets.MapDelete(<span class="str">"/{id:int}"</span>,
+    <span class="ty">Results</span>&lt;<span class="ty">NoContent</span>, <span class="ty">NotFound</span>&gt; (<span class="kw">int</span> id, <span class="ty">ITicketStore</span> store) =&gt;
+        store.Delete(id) ? <span class="ty">TypedResults</span>.NoContent() : <span class="ty">TypedResults</span>.NotFound());</code></pre>
+<p><code>MapGroup</code> zwraca <code>RouteGroupBuilder</code> — obiekt, na którym można ustawić coś <em>dla całej grupy</em>: <code>.RequireAuthorization()</code>, <code>.WithTags("Tickets")</code>, filtry. To ten sam mechanizm, którym w lekcji 0004 rozniesiemy endpointy do osobnych plików.</p>
+
+<h3>Co zmienia <code>{id:int}</code></h3>
+<p>Dopisanie ograniczenia zmienia zachowanie, które widziałeś w lekcji 0001. Zweryfikowane:</p>
+<table>
+  <thead><tr><th>Trasa</th><th><code>GET /tickets/abc</code></th><th>Dlaczego</th></tr></thead>
+  <tbody>
+    <tr><td><code>/tickets/{id}</code></td><td>400 Bad Request</td><td>trasa pasuje, binding <code>int</code> się wywraca</td></tr>
+    <tr><td><code>/tickets/{id:int}</code></td><td>404 Not Found</td><td>trasa w ogóle nie pasuje — routing nie ma dokąd pójść</td></tr>
+  </tbody>
+</table>
+<p>Dla API zwykle chcesz 404: „nie ma takiego zasobu” jest bliższe prawdy niż „źle sformułowałeś żądanie”.</p>
+
+<h2>Krok 5: dług z lekcji 0002 — <code>lock</code></h2>
+<p>W lekcji 0002 zostało pytanie bez odpowiedzi: <code>InMemoryTicketStore</code> jest singletonem, obsługuje żądania równolegle na różnych wątkach, a <code>List&lt;T&gt;</code> nie jest thread-safe. Teraz, gdy doszły zapisy i usuwanie, to przestaje być teoretyczne.</p>
+<pre><code><span class="kw">public class</span> <span class="ty">InMemoryTicketStore</span> : <span class="ty">ITicketStore</span>
+{
+    <span class="kw">private readonly</span> <span class="ty">Lock</span> _gate = <span class="kw">new</span>();
+    <span class="kw">private readonly</span> <span class="ty">List</span>&lt;<span class="ty">Ticket</span>&gt; _tickets = [ … ];
+
+    <span class="kw">public</span> <span class="ty">IReadOnlyList</span>&lt;<span class="ty">Ticket</span>&gt; GetAll()
+    {
+        <span class="kw">lock</span> (_gate) <span class="kw">return</span> _tickets.ToList();
+    }
+
+    <span class="kw">public</span> <span class="ty">Ticket</span> Add(<span class="kw">string</span> title)
+    {
+        <span class="kw">lock</span> (_gate)
+        {
+            <span class="cm">// …</span>
+        }
+    }
+    <span class="cm">// tak samo GetById, Update, Delete</span>
+}</code></pre>
+<p>Trzy rzeczy, które łatwo przeoczyć:</p>
+<ul>
+  <li><strong>Odczyt też trzeba osłonić.</strong> Czytanie listy w trakcie cudzego zapisu to wyścig, nie tylko dwa równoczesne zapisy.</li>
+  <li><strong><code>GetAll</code> zwraca kopię</strong> (<code>.ToList()</code>). Bez tego oddajesz referencję do żywej listy, a wołający iteruje ją już poza <code>lock</code> — i dostaje <code>InvalidOperationException: Collection was modified</code>, gdy ktoś w tym czasie doda zgłoszenie.</li>
+  <li><code>Lock</code> to typ z <code>System.Threading</code> (nowość .NET 9). Starszy kod firmowy blokuje na zwykłym <code>private readonly object _gate = new();</code> — działa tak samo.</li>
+</ul>
+<h3>To samo w <code>TicketMetrics</code>, ale taniej</h3>
+<p>Twój licznik ma teraz jedną linię, która wygląda niewinnie:</p>
+<pre><code><span class="kw">private int</span> _created;
+
+<span class="kw">public void</span> RecordCreated(<span class="ty">ICurrentUser</span> user)
+{
+    _created++;
+}</code></pre>
+<p><code>_created++</code> to <strong>trzy operacje procesora</strong>: odczytaj z pamięci, dodaj 1, zapisz z powrotem. Dwa wątki mogą wejść jednocześnie:</p>
+<table>
+  <thead><tr><th>Wątek A</th><th>Wątek B</th><th><code>_created</code></th></tr></thead>
+  <tbody>
+    <tr><td>czyta 7</td><td></td><td>7</td></tr>
+    <tr><td></td><td>czyta 7</td><td>7</td></tr>
+    <tr><td>zapisuje 8</td><td></td><td>8</td></tr>
+    <tr><td></td><td>zapisuje 8</td><td>8</td></tr>
+  </tbody>
+</table>
+<p>Dwa POST-y, jedno zliczenie. <code>/metrics</code> kłamie. Poprawka to podmiana jednej linii:</p>
+<pre><code>Interlocked.Increment(<span class="kw">ref</span> _created);</code></pre>
+<p><code>Interlocked</code> (z <code>System.Threading</code>) robi całą trójkę jako <strong>jedną niepodzielną instrukcję procesora</strong> — nikt się nie wcina w środek. <code>ref</code> znaczy „daj mi adres tego pola, nie kopię wartości” — bez tego metoda dostałaby liczbę i nie miałaby czego zmienić.</p>
+<p>Dlaczego nie <code>lock</code>? Bo można, tylko drożej: <code>lock</code> to obiekt synchronizacyjny i potencjalne uśpienie wątku, <code>Interlocked</code> to jedna instrukcja sprzętowa. Dla samego licznika to overkill. Reguła: <strong>jedna liczba → <code>Interlocked</code>, cała kolekcja albo kilka pól naraz → <code>lock</code></strong>.</p>
+<p>Odczyt <code>public int Created =&gt; _created;</code> zostaw jak jest — czytanie <code>int</code> jest atomowe samo z siebie.</p>
+<div class="callout analogy">
+  W JS tego problemu nie miałeś: event loop jest jednowątkowy, więc między <code>const n = counter</code> a <code>counter = n + 1</code> nikt ci się nie wcina. ASP.NET Core obsługuje żądania <em>naprawdę</em> równolegle, na puli wątków. To pierwsza rzecz z tego kursu, która nie ma odpowiednika po stronie frontu.
+</div>
+<p>Przy EF Core (lekcja 0008) problem zniknie u źródła: <code>DbContext</code> jest Scoped, każde żądanie ma własny, nie ma czego blokować. To jest właśnie <em>powód</em>, dla którego jest Scoped.</p>
+
+<h2>Krok 6: skąd biorą się <code>Id</code></h2>
+<p>Zostało jedno miejsce, którego nikt jeszcze nie ruszył. Twój <code>Add</code> nadaje identyfikator tak:</p>
+<pre><code><span class="kw">var</span> ticket = <span class="kw">new</span> <span class="ty">Ticket</span>(_tickets.Count + 1, title);</code></pre>
+<p>Do lekcji 0002 to działało, bo zgłoszeń tylko przybywało. W tej lekcji dodałeś <code>Delete</code> — i założenie się rozpadło. Zweryfikowane na działającej aplikacji:</p>
+<table>
+  <thead><tr><th>Krok</th><th>Lista po operacji</th><th><code>Count</code></th><th>Nadane Id</th></tr></thead>
+  <tbody>
+    <tr><td>start</td><td>1, 2</td><td>2</td><td>—</td></tr>
+    <tr><td><code>POST</code></td><td>1, 2, <strong>3</strong></td><td>3</td><td>3</td></tr>
+    <tr><td><code>DELETE /tickets/2</code></td><td>1, 3</td><td>2</td><td>—</td></tr>
+    <tr><td><code>POST</code></td><td>1, 3, <strong>3</strong></td><td>3</td><td><strong>3 — już istnieje</strong></td></tr>
+  </tbody>
+</table>
+<p>Od tej chwili <code>GET /tickets/3</code> zwraca pierwsze pasujące zgłoszenie, a <code>DELETE /tickets/3</code> kasuje oba naraz (<code>RemoveAll</code>). Zasób przestał być jednoznacznie adresowalny — czyli API przestało być REST-owe w najbardziej podstawowym sensie.</p>
+<div class="callout warn">
+  <strong>Sedno:</strong> <code>Count</code> opisuje <em>ile rzeczy jest teraz</em>, a identyfikator musi być pochodną <em>ile rzeczy kiedykolwiek powstało</em>. To dwie różne liczby w każdym systemie, który cokolwiek usuwa. Prawdziwa baza rozwiązuje to sekwencją albo <code>IDENTITY</code> — licznikiem, który nigdy nie cofa się po <code>DELETE</code>.
+</div>
+<p>Naprawa czeka pod znacznikiem <code>TODO(human)</code> w <code>InMemoryTicketStore.cs</code> — patrz zadanie 5.</p>
+
+<div class="task">
+  <h3>Zadanie</h3>
+  <ol>
+    <li>Przepisz kroki 1–4. Sprawdź komplet — najwygodniej curlem:
+<pre><code>curl -i -X POST -H "Content-Type: application/json" -H "X-User: wojtek" \
+     -d '{"title":"Trzecie"}' http://localhost:5006/tickets
+curl -i -X PUT -H "Content-Type: application/json" \
+     -d '{"title":"Zmienione"}' http://localhost:5006/tickets/1
+curl -i -X DELETE http://localhost:5006/tickets/2</code></pre>
+      Sprawdź <strong>nagłówki</strong> (<code>-i</code>), nie tylko ciało: POST ma dać 201 z <code>Location: /tickets/3</code>, PUT i DELETE po 204 bez ciała.</li>
+    <li>Wywołaj <code>DELETE /tickets/2</code> dwa razy. Drugi raz musi dać 404 — jeśli daje 204, twój <code>Delete</code> nie sprawdza, czy cokolwiek usunął.</li>
+    <li>Porównaj <code>GET /tickets/abc</code> przed dodaniem <code>:int</code> i po. Zobacz, że kod odpowiedzi się zmienia.</li>
+    <li>Dołóż <code>lock</code> z kroku 5 i <code>Interlocked.Increment</code> w metrykach.</li>
+    <li><strong>Odtwórz kolizję Id</strong>: <code>POST</code>, potem <code>DELETE /tickets/2</code>, potem znowu <code>POST</code>. <code>GET /tickets</code> pokaże dwa zgłoszenia o tym samym <code>Id</code>.</li>
+    <li><strong>Napraw generowanie Id</strong> — <code>TODO(human)</code> w <code>InMemoryTicketStore.cs</code>. Potrzebujesz licznika, który nie cofa się po usunięciu. Możliwości: pole <code>_nextId</code> zwiększane przy każdym dodaniu, albo <code>_tickets.Max(t =&gt; t.Id) + 1</code>. Zastanów się, co się dzieje przy pustej liście i co przy dwóch równoczesnych <code>POST</code>-ach.</li>
+  </ol>
+  <div class="check">
+    <label><input type="checkbox" id="c1"> POST zwraca 201 z nagłówkiem <code>Location</code></label>
+    <label><input type="checkbox" id="c2"> PUT i DELETE zwracają 204 z pustym ciałem, a 404 dla nieistniejącego id</label>
+    <label><input type="checkbox" id="c3"> Prefiks <code>/tickets</code> występuje w kodzie dokładnie raz</label>
+    <label><input type="checkbox" id="c4"> Widziałem, jak <code>{id:int}</code> zmienia 400 na 404</label>
+    <label><input type="checkbox" id="c5"> Store i licznik są osłonięte przed równoczesnym dostępem</label>
+    <label><input type="checkbox" id="c6"> Odtworzyłem kolizję Id i naprawiłem generowanie identyfikatorów</label>
+  </div>
+</div>
+
+<h2>Sprawdź się</h2>
+<p>Odpowiedz zanim klikniesz. Zła odpowiedź nie zdradza dobrej — spróbuj jeszcze raz.</p>
+
+<div class="quiz" id="q1" data-answer="1">
+  <div class="q">Handler ma zwracać <code>Ok&lt;Ticket&gt;</code> albo <code>NotFound</code>. Co jest konieczne?</div>
+  <button class="opt">Rzutowanie obu na IResult</button>
+  <button class="opt">Jawny typ zwracany lambdy</button>
+  <button class="opt">Osobny endpoint dla braku</button>
+  <div class="why">To dwie niepowiązane klasy, więc ternary nie ma wspólnego typu do wywnioskowania. <code>Results&lt;Ok&lt;Ticket&gt;, NotFound&gt;</code> przed listą parametrów mówi kompilatorowi, jaka jest unia. Przy <code>Results.*</code> problem nie występuje, bo wszystko jest <code>IResult</code>.</div>
+</div>
+
+<div class="quiz" id="q2" data-answer="0">
+  <div class="q">Po <code>DELETE</code> zwracającym 204 frontend woła <code>res.json()</code>. Co się stanie?</div>
+  <button class="opt">Wyjątek — nie ma czego parsować</button>
+  <button class="opt">Zwróci null, bo ciało puste</button>
+  <button class="opt">Zwróci pusty obiekt JSON</button>
+  <div class="why">204 znaczy „bez treści” — ciało jest fizycznie puste, a <code>JSON.parse("")</code> rzuca. Sprawdzaj <code>res.status</code> albo <code>res.ok</code> i nie parsuj. To najczęstsze zderzenie frontu z backendem przy DELETE.</div>
+</div>
+
+<div class="quiz" id="q3" data-answer="2">
+  <div class="q">Do czego służy nagłówek <code>Location</code> w odpowiedzi 201?</div>
+  <button class="opt">Wskazuje serwer, który utworzył</button>
+  <button class="opt">Wymusza przekierowanie klienta</button>
+  <button class="opt">Podaje adres nowego zasobu</button>
+  <div class="why">To adres, pod którym utworzony zasób jest dostępny — u nas <code>/tickets/3</code>. Klient może po nim przejść do szczegółów bez zgadywania URL-a. Przekierowania to 3xx; przy 201 przeglądarka nigdzie nie skacze.</div>
+</div>
+
+<div class="quiz" id="q4" data-answer="0">
+  <div class="q">Skąd binder weźmie parametr <code>CreateTicketRequest request</code>?</div>
+  <button class="opt">Z ciała żądania jako JSON</button>
+  <button class="opt">Z kontenera wstrzykiwania</button>
+  <button class="opt">Z parametrów query stringa</button>
+  <div class="why">Typ złożony, którego nie ma w DI, jest deserializowany z body. Gdybyś zarejestrował go w <code>builder.Services</code>, binder wziąłby go z kontenera — dokładnie ta pomyłka daje potem „dlaczego moje pola są puste”.</div>
+</div>
+
+<div class="quiz" id="q5" data-answer="2">
+  <div class="q">Dlaczego <code>_created++</code> w singletonie potrafi zgubić zliczenie?</div>
+  <button class="opt">Bo pole nie jest oznaczone volatile</button>
+  <button class="opt">Bo licznik przepełnia zakres int</button>
+  <button class="opt">Bo to odczyt, dodanie i zapis</button>
+  <div class="why">Trzy operacje, nie jedna. Dwa wątki mogą odczytać tę samą wartość, zanim którykolwiek zdąży zapisać — obydwa zapiszą tę samą liczbę. <code>Interlocked.Increment(ref _created)</code> robi całość jako jedną instrukcję procesora.</div>
+</div>
+
+<details class="recall">
+  <summary>Czym różni się <code>TypedResults.Ok(x)</code> od <code>Results.Ok(x)</code>?</summary>
+  <p>Wysyłają identyczną odpowiedź HTTP. Różnica jest w typie zwracanym: <code>Results.Ok</code> daje <code>IResult</code>, <code>TypedResults.Ok</code> daje <code>Ok&lt;T&gt;</code>. Konkretny typ pozwala frameworkowi wygenerować metadane OpenAPI bez <code>.Produces()</code>, a testowi sprawdzić wynik bez rzutowania.</p>
+</details>
+
+<details class="recall">
+  <summary>Kiedy 201, kiedy 204, kiedy 200?</summary>
+  <p>201 — POST utworzył nowy zasób; adres idzie w nagłówku <code>Location</code>. 204 — operacja się udała i nie ma nic do zwrócenia (typowo PUT i DELETE). 200 — zwracasz zasób albo kolekcję.</p>
+</details>
+
+<details class="recall">
+  <summary>Dlaczego <code>_tickets.Count + 1</code> to zły sposób nadawania <code>Id</code>?</summary>
+  <p><code>Count</code> mówi, ile elementów jest <em>teraz</em>. Identyfikator musi wynikać z tego, ile ich kiedykolwiek <em>powstało</em>. Po <code>DELETE</code> te liczby się rozjeżdżają i kolejne <code>Add</code> nadaje Id, które już istnieje.</p>
+</details>
+
+<details class="recall">
+  <summary>Dlaczego <code>GetAll()</code> zwraca kopię listy zamiast samej listy?</summary>
+  <p>Bo store jest singletonem. Oddając referencję do żywej listy, pozwalasz wołającemu iterować ją poza <code>lock</code> — a inne żądanie może w tym czasie dodać element i wywołać <code>InvalidOperationException: Collection was modified</code>.</p>
+</details>
+
+<h2>Źródło pierwotne</h2>
+<div class="callout source">
+  <a href="https://learn.microsoft.com/en-us/aspnet/core/fundamentals/minimal-apis/responses?view=aspnetcore-10.0">Microsoft Learn — How to create responses in Minimal API apps</a>. Przeczytaj sekcje <em>IResult return values</em>, <em>TypedResults versus Results</em> i <em>Results&lt;TResult1, TResultN&gt;</em> (ok. 10 min); resztę (pliki, SSE, nagłówki) pomiń. Do grup tras: <a href="https://learn.microsoft.com/en-us/aspnet/core/fundamentals/routing?view=aspnetcore-10.0#route-groups">Route groups</a> w Routing in ASP.NET Core — krótka sekcja, pokazuje też zagnieżdżanie grup.
+</div>
+
+<div class="callout ask">Coś niejasne — nie kompiluje się <code>Results&lt;…&gt;</code>, POST zwraca 415 albo 400, nie widać nagłówka <code>Location</code>? Wklej to nauczycielowi w terminalu (Claude Code w <code>C:\PLAYGROUND\asp</code>). Pytanie do zespołu: <em>„zwracamy <code>Results</code> czy <code>TypedResults</code> i czy mamy na to regułę?”</em> — odpowiedź powie ci, jak poważnie traktują OpenAPI i testy endpointów.</div>
+
+<h2>Co dalej</h2>
+<p>Twój <code>Program.cs</code> ma teraz ok. 50 linii i robi cztery rzeczy naraz: konfiguruje DI, definiuje CRUD zgłoszeń, wystawia metryki i eksperyment z lifetime'ami. Dołóż drugi zasób (komentarze do zgłoszeń) i zrobi się z tego 150 linii, w których nic się nie znajduje. Lekcja 0004: <strong>vertical slices</strong> — jeden folder na feature, endpointy jako metody rozszerzające, <code>Program.cs</code> z powrotem krótki. To jest ten moment, w którym kurs zaczyna wyglądać jak kod z twojej firmy.</p>
+
+<nav class="lesson-nav">
+  <a href="0002-di-lifetimes.html">← Lekcja 0002</a>
+  <a href="../reference/minimal-api-crud.html">Ściąga: Minimal API</a>
+  <a href="../reference/glossary.html">Glossary</a>
+</nav>
+</div>
+</body>
+</html>
