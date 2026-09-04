@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>0001 · Program.cs od środka — ASP.NET Core dla frontendowca</title>
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/quiz.js" defer></script>
+<script src="../assets/checklist.js" defer></script>
+</head>
+<body>
+<div class="page">
+<header class="lesson-head">
+  <div class="kicker">Lekcja 0001 · ~15 min · projekt Helpdesk</div>
+  <h1>Program.cs od środka: builder, app, endpoint</h1>
+  <p class="subtitle">Cel: stworzyć projekt Helpdesk, uruchomić go i umieć wytłumaczyć każdą z czterech linijek, które .NET wygenerował. Bez tego żaden DI ani CQRS nie ma sensu.</p>
+  <p class="meta">Wymaga: .NET SDK 10 (masz 10.0.400), VS Code, terminal. Zero C# — wszystko, co potrzebne, jest poniżej.</p>
+</header>
+
+<h2>Po co ta lekcja</h2>
+<p>W firmowym backendzie <code>Program.cs</code> ma zwykle 100–300 linii i wygląda strasznie. Ale to zawsze ten sam szkielet w dwóch fazach: <strong>konfiguruję</strong> (przed <code>Build()</code>) i <strong>obsługuję żądania</strong> (po <code>Build()</code>). Dependency Injection, o którym jest następna lekcja, żyje w pierwszej fazie. Endpointy, handlery, walidacja — w drugiej. Jeśli widzisz tę granicę, resztę da się czytać.</p>
+
+<h2>Cztery linijki</h2>
+<p>Tyle generuje <code>dotnet new web</code> w .NET 10 (zweryfikowane na twojej maszynie):<sup class="n">1</sup></p>
+<span class="sidenote"><span class="n">1</span>Szablon <code>web</code> to „ASP.NET Core — puste”. Szablon <code>webapi</code> dodaje OpenAPI i przykładowy endpoint; celowo zaczynamy od pustego, żeby każdą linię dopisać samemu.</span>
+<div class="filename">project/Helpdesk/Program.cs</div>
+<pre><code><span class="kw">var</span> builder = WebApplication.CreateBuilder(args);
+<span class="kw">var</span> app = builder.Build();
+
+app.MapGet(<span class="str">"/"</span>, () =&gt; <span class="str">"Hello World!"</span>);
+
+app.Run();</code></pre>
+
+<table>
+  <thead><tr><th>Linia</th><th>Co robi</th><th>Analogia JS</th></tr></thead>
+  <tbody>
+    <tr><td><code>CreateBuilder(args)</code></td><td>Tworzy <strong>WebApplicationBuilder</strong>: wczytuje <code>appsettings.json</code>, zmienne środowiskowe, ustawia logowanie i pusty rejestr serwisów <code>builder.Services</code>. Nic nie nasłuchuje.</td><td>Faza „importy i konfiguracja” na górze pliku Express, ale wbudowana i ustandaryzowana.</td></tr>
+    <tr><td><code>builder.Build()</code></td><td>Zamraża rejestr serwisów i buduje <strong>WebApplication</strong>. Po tej linii nie da się już zarejestrować serwisu — to <em>granica dwóch faz</em>.</td><td><code>const app = express()</code> — z tą różnicą, że Express nie ma fazy „przed”.</td></tr>
+    <tr><td><code>app.MapGet(path, handler)</code></td><td>Rejestruje <strong>endpoint</strong>: trasa + lambda. Zwrócony obiekt jest serializowany do JSON, string idzie jako <code>text/plain</code>.</td><td><code>app.get('/', (req, res) =&gt; res.send('Hello'))</code>, tylko zwracasz wartość zamiast wołać <code>res.send</code>.</td></tr>
+    <tr><td><code>app.Run()</code></td><td>Startuje serwer Kestrel i <em>blokuje</em> do zamknięcia procesu.</td><td><code>app.listen(port)</code>.</td></tr>
+  </tbody>
+</table>
+
+<div class="callout analogy">
+  W Vue masz <code>createApp(App)</code> → <code>.use(router).use(pinia)</code> → <code>.mount('#app')</code>. Tu jest to samo: <code>CreateBuilder</code> → <code>builder.Services.Add…</code> → <code>Build()</code> → <code>Map…</code> → <code>Run()</code>. Po <code>mount</code> nie dodasz pluginu; po <code>Build</code> nie dodasz serwisu.
+</div>
+
+<h3>Składnia C#, którą tu widzisz</h3>
+<ul>
+  <li><code>var</code> — inferencja typu jak <code>const</code> w TS; typ jest statyczny, nie dynamiczny.</li>
+  <li><code>() =&gt; "Hello World!"</code> — lambda, identyczna jak arrow function.</li>
+  <li>Brak klasy i <code>Main</code> — to <em>top-level statements</em>; kompilator sam owija plik w metodę startową. Tylko jeden plik w projekcie może tak wyglądać.</li>
+  <li>Średniki są obowiązkowe. Kompilator powie, gdzie brakuje.</li>
+</ul>
+<p>Pełniejsza ściąga składni: <a href="../reference/glossary.html">Glossary → „Składnia C# dla ludzi od TS”</a>.</p>
+
+<h2>Zadanie</h2>
+<div class="task">
+  <h3>Zbuduj Helpdesk i dodaj pierwszy endpoint</h3>
+  <ol>
+    <li>W terminalu, w <code>C:\REPOS\asp</code>:
+<pre><code>dotnet new web -n Helpdesk -o project/Helpdesk
+cd project/Helpdesk
+dotnet run</code></pre>
+      W konsoli pojawi się <code>Now listening on: http://localhost:XXXX</code>. Otwórz ten adres w przeglądarce. Port jest w <code>Properties/launchSettings.json</code>.</li>
+    <li>Zatrzymaj (<kbd>Ctrl+C</kbd>). Uruchom ponownie przez <code>dotnet watch run</code> — przebudowuje po zapisie pliku, jak Vite HMR (wolniej, ale działa).</li>
+    <li>Dodaj pod istniejącym <code>MapGet</code> drugi endpoint zwracający listę zgłoszeń. Zwróć <strong>tablicę obiektów anonimowych</strong> (<code>new[] { new { Id = 1, Title = "…" }, … }</code>) — bez klas, bez DTO, to przyjdzie później. Sprawdź w przeglądarce, że <code>/tickets</code> zwraca JSON i że nazwy pól są w camelCase mimo że w C# napisałeś PascalCase.</li>
+    <li>Dodaj trzeci endpoint z parametrem trasy: <code>/tickets/{id}</code>. Handler przyjmuje <code>(int id)</code> — nazwa parametru lambdy musi zgadzać się z nazwą w klamrach. Zwróć obiekt z tym id. Wejdź na <code>/tickets/abc</code> i zobacz, co ASP.NET robi, gdy nie może zbindować <code>int</code>.</li>
+    <li>Przenieś wywołanie <code>app.MapGet("/tickets", …)</code> <em>przed</em> linię <code>var app = builder.Build();</code>. Przeczytaj błąd kompilatora. Cofnij.</li>
+  </ol>
+  <div class="check">
+    <label><input type="checkbox"> <code>dotnet run</code> działa, widzę Hello World</label>
+    <label><input type="checkbox"> <code>/tickets</code> zwraca JSON w camelCase</label>
+    <label><input type="checkbox"> <code>/tickets/1</code> działa, <code>/tickets/abc</code> daje 400</label>
+    <label><input type="checkbox"> Rozumiem, dlaczego <code>MapGet</code> przed <code>Build()</code> się nie kompiluje</label>
+  </div>
+</div>
+
+<div class="callout warn">Nie kopiuj kodu z lekcji — przepisuj. Literówki i czerwone podkreślenia w VS Code to część nauki: uczysz się czytać komunikaty kompilatora C#, a one są dużo bardziej gadatliwe niż TS.</div>
+
+<h2>Sprawdź się</h2>
+<p>Odpowiedz <em>zanim</em> klikniesz. Zła odpowiedź nie zdradza dobrej — spróbuj jeszcze raz.</p>
+
+<div class="quiz" id="q1" data-answer="2">
+  <div class="q">Po której linii nie da się już zarejestrować nowego serwisu w kontenerze DI?</div>
+  <button class="opt">Po wywołaniu app.Run()</button>
+  <button class="opt">Po wywołaniu MapGet()</button>
+  <button class="opt">Po builder.Build()</button>
+  <div class="why"><code>Build()</code> zamraża <code>builder.Services</code> i tworzy kontener. <code>MapGet</code> i <code>Run</code> są już po tej granicy.</div>
+</div>
+
+<div class="quiz" id="q2" data-answer="0">
+  <div class="q">Handler <code>() =&gt; new { Id = 1 }</code> zwraca do klienta:</div>
+  <button class="opt">JSON: {"id":1}</button>
+  <button class="opt">JSON: {"Id":1}</button>
+  <button class="opt">text: { Id = 1 }</button>
+  <div class="why">Obiekty są serializowane do JSON, a domyślna polityka nazw to camelCase. Tylko <code>string</code> idzie jako zwykły tekst.</div>
+</div>
+
+<div class="quiz" id="q3" data-answer="1">
+  <div class="q">W <code>app.MapGet("/tickets/{id}", (int id) =&gt; …)</code> skąd handler wie, co wstawić w <code>id</code>?</div>
+  <button class="opt">Z kolejności argumentów</button>
+  <button class="opt">Z nazwy parametru lambdy</button>
+  <button class="opt">Z atrybutu [FromRoute]</button>
+  <div class="why">Minimal API wiąże parametry po nazwie: <code>{id}</code> w trasie → parametr <code>id</code>. Atrybuty są opcjonalne i służą do rozstrzygania niejednoznaczności.</div>
+</div>
+
+<details class="recall">
+  <summary>Jakie dwie fazy ma Program.cs i co jest granicą?</summary>
+  <p>Faza konfiguracji (rejestrowanie serwisów na <code>builder.Services</code>, config, logowanie) i faza obsługi żądań (middleware, endpointy). Granicą jest <code>builder.Build()</code>.</p>
+</details>
+
+<details class="recall">
+  <summary>Czym różni się <code>dotnet new web</code> od <code>dotnet new webapi</code>?</summary>
+  <p><code>web</code> = pusty Program.cs z jednym Hello World. <code>webapi</code> = dodatkowo OpenAPI i przykładowy endpoint pogody. Ta sama maszyneria.</p>
+</details>
+
+<h2>Źródło pierwotne</h2>
+<div class="callout source">
+  <a href="https://learn.microsoft.com/en-us/aspnet/core/tutorials/min-web-api?view=aspnetcore-10.0">Microsoft Learn — Tutorial: Create a Minimal API with ASP.NET Core</a>. Przeczytaj do sekcji <em>Examine the project files</em> włącznie (ok. 10 min); resztę (EF Core, Todo) pomiń — dojdziemy tam sami w lekcji 0008. Dokumentacja zespołu ASP.NET; wszystko w tej lekcji z niej wynika. Uwaga: tutorial używa <code>dotnet new webapi</code> (to też minimal API, tylko z OpenAPI i przykładem), my <code>dotnet new web</code>. Dowód, że cztery linijki są autentyczne: <a href="https://raw.githubusercontent.com/dotnet/aspnetcore/release/10.0/src/ProjectTemplates/Web.ProjectTemplates/content/EmptyWeb-CSharp/Program.cs">źródło szablonu w repo dotnet/aspnetcore</a>. Stanowisko Microsoftu „minimal API dla nowych projektów”: <a href="https://learn.microsoft.com/en-us/aspnet/core/fundamentals/apis?view=aspnetcore-10.0">APIs overview</a>.
+</div>
+
+<div class="callout ask">Coś niejasne — błąd kompilatora, dziwny port, JSON nie taki jak w quizie? Wklej to nauczycielowi w terminalu (Claude Code w <code>C:\REPOS\asp</code>). Pytaj też „dlaczego”, nie tylko „jak” — to jest ważniejsze przy DI.</div>
+
+<h2>Co dalej</h2>
+<p>Lekcja 0002: pierwszy serwis przez DI. Wyciągniemy listę zgłoszeń z lambdy do klasy <code>InMemoryTicketStore</code>, zarejestrujemy ją w <code>builder.Services</code> i zobaczymy na własne oczy różnicę między Singleton, Scoped i Transient.</p>
+
+<nav class="lesson-nav">
+  <a href="../reference/glossary.html">Glossary</a>
+  <span>Lekcja 0002 → (wkrótce)</span>
+</nav>
+</div>
+</body>
+</html>

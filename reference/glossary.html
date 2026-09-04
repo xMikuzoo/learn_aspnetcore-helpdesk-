@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Glossary — ASP.NET Core dla frontendowca</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<div class="page">
+<header class="lesson-head">
+  <div class="kicker">Reference · Glossary</div>
+  <h1>Słownik pojęć</h1>
+  <p class="subtitle">Terminy po angielsku (tak jak w pracy), wyjaśnienie po polsku, analogia z frontendu gdzie pomaga. Każda lekcja trzyma się tych definicji.</p>
+  <p class="meta">Kolumna „Lekcja” mówi, gdzie pojęcie jest ćwiczone. Puste = jeszcze nie było.</p>
+</header>
+
+<h2>Szkielet aplikacji</h2>
+<dl class="glossary">
+  <dt>Program.cs <span class="pl">— punkt startowy</span></dt>
+  <dd>Jedyny plik, który .NET uruchamia jako pierwszy. Dzięki <em>top-level statements</em> nie ma klasy ani <code>Main</code> — kod leci od góry, jak w skrypcie Node. Lekcja <a href="../lessons/0001-program-cs-od-srodka.html">0001</a>.</dd>
+
+  <dt>WebApplicationBuilder <span class="pl">— „przepis” na aplikację</span></dt>
+  <dd>Obiekt zwracany przez <code>WebApplication.CreateBuilder(args)</code>. Faza konfiguracji: tu rejestrujesz serwisy (<code>builder.Services</code>), czytasz config (<code>builder.Configuration</code>), ustawiasz logowanie. Nic jeszcze nie działa. Lekcja 0001.</dd>
+
+  <dt>WebApplication <span class="pl">— zbudowana aplikacja</span></dt>
+  <dd>Wynik <code>builder.Build()</code>. Od tego momentu rejestr serwisów jest zamrożony; teraz definiujesz middleware i endpointy, a na końcu <code>app.Run()</code>. Lekcja 0001.</dd>
+
+  <dt>Endpoint <span class="pl">— punkt końcowy HTTP</span></dt>
+  <dd>Para: wzorzec trasy (np. <code>GET /tickets/{id}</code>) + kod, który ją obsługuje. W minimal API tworzysz go przez <code>app.MapGet / MapPost / MapPut / MapDelete</code>. Analogia: <code>app.get('/tickets/:id', handler)</code> w Express. Lekcja 0001.</dd>
+
+  <dt>Route <span class="pl">— trasa</span></dt>
+  <dd>Wzorzec URL endpointu. Segmenty w nawiasach klamrowych <code>{id}</code> są parametrami; ASP.NET wiąże je z argumentami handlera po nazwie.</dd>
+
+  <dt>Endpoint handler <span class="pl">— funkcja obsługująca trasę</span></dt>
+  <dd>Lambda lub metoda przekazana do <code>MapGet</code> itd. Jej zwrócona wartość jest serializowana do JSON. Nie mylić z <em>command/query handler</em> (niżej) — to inne pojęcie, choć słowo to samo.</dd>
+
+  <dt>Middleware <span class="pl">— warstwa pośrednia</span></dt>
+  <dd>Element łańcucha przetwarzającego każde żądanie przed dotarciem do endpointu (i po). Rejestrowany przez <code>app.Use…</code>. Analogia: middleware w Express / Koa. Kolejność ma znaczenie.</dd>
+
+  <dt>Request pipeline <span class="pl">— potok żądania</span></dt>
+  <dd>Uporządkowany łańcuch middleware zakończony endpointem. Nie mylić z <em>pipeline behavior</em> (mediator) — to osobny potok, wewnątrz aplikacji.</dd>
+
+  <dt>Minimal API</dt>
+  <dd>Styl pisania endpointów bezpośrednio na <code>app</code>, bez klas kontrolerów. Domyślny w tym kursie.</dd>
+
+  <dt>Controller <span class="pl">— kontroler</span></dt>
+  <dd>Klasa grupująca endpointy jako metody (<code>[HttpGet]</code>), starszy styl, nadal powszechny w firmowym kodzie. Ta sama maszyneria pod spodem.</dd>
+</dl>
+
+<h2>Dependency Injection</h2>
+<dl class="glossary">
+  <dt>Service <span class="pl">— serwis</span></dt>
+  <dd>Każdy obiekt, który aplikacja tworzy i wstrzykuje zamiast <code>new</code>-ować ręcznie: repozytorium, klient HTTP, handler, walidator. Nazwa nie mówi nic o roli — mówi tylko „zarządza mną kontener”.</dd>
+
+  <dt>Dependency Injection (DI) <span class="pl">— wstrzykiwanie zależności</span></dt>
+  <dd>Klasa deklaruje, czego potrzebuje (parametry konstruktora), a kontener to dostarcza. Klasa nie wie, skąd zależność pochodzi ani jak ją stworzyć. Analogia: <code>provide/inject</code> w Vue, ale obowiązkowe i dla całej aplikacji.</dd>
+
+  <dt>DI container / IServiceProvider <span class="pl">— kontener</span></dt>
+  <dd>Rejestr „interfejs → implementacja → lifetime”. Budujesz go przez <code>builder.Services</code> (<code>IServiceCollection</code>), pytasz o obiekty przez <code>IServiceProvider</code>. Zwykle nie pytasz sam — ASP.NET robi to, tworząc handlery.</dd>
+
+  <dt>Lifetime <span class="pl">— czas życia serwisu</span></dt>
+  <dd>Jak długo kontener trzyma jedną instancję. Trzy opcje: <strong>Singleton</strong> (jedna na całą aplikację), <strong>Scoped</strong> (jedna na żądanie HTTP), <strong>Transient</strong> (nowa przy każdym wstrzyknięciu).</dd>
+
+  <dt>Captive dependency <span class="pl">— „uwięziona” zależność</span></dt>
+  <dd>Błąd: Singleton dostaje wstrzyknięty Scoped/Transient i trzyma go na zawsze. Kontener w trybie Development rzuca wyjątek, żeby to wyłapać.</dd>
+</dl>
+
+<h2>Architektura</h2>
+<dl class="glossary">
+  <dt>Vertical slice <span class="pl">— pionowy wycinek</span></dt>
+  <dd>Organizacja kodu per feature, nie per warstwa: folder <code>Features/Tickets/CreateTicket/</code> zawiera endpoint, command, handler, validator. Zmiana w jednym feature nie dotyka innych.</dd>
+
+  <dt>Clean Architecture</dt>
+  <dd>Organizacja per warstwa z regułą zależności: <strong>Domain</strong> ← <strong>Application</strong> ← <strong>Infrastructure</strong> / <strong>Presentation</strong>. Wewnętrzne warstwy nie znają zewnętrznych. Slices i Clean Arch można łączyć.</dd>
+
+  <dt>Domain <span class="pl">— warstwa domeny</span></dt>
+  <dd>Encje i reguły biznesowe bez zależności od frameworków. „Ticket nie może być zamknięty dwa razy” żyje tutaj.</dd>
+
+  <dt>Application <span class="pl">— warstwa aplikacji</span></dt>
+  <dd>Use-case'y: commands, queries, handlery, interfejsy do infrastruktury (np. <code>ITicketRepository</code>). Zna Domain, nie zna bazy danych.</dd>
+
+  <dt>Infrastructure</dt>
+  <dd>Implementacje interfejsów z Application: EF Core, e-mail, zewnętrzne API.</dd>
+
+  <dt>Presentation / API</dt>
+  <dd>Endpointy / kontrolery. Tłumaczy HTTP na command/query i z powrotem.</dd>
+
+  <dt>Repository <span class="pl">— repozytorium</span></dt>
+  <dd>Abstrakcja nad dostępem do danych (<code>GetById</code>, <code>Add</code>…). W wielu projektach zastępuje ją bezpośrednio <code>DbContext</code>.</dd>
+</dl>
+
+<h2>CQRS i mediator</h2>
+<dl class="glossary">
+  <dt>Command <span class="pl">— polecenie</span></dt>
+  <dd>Obiekt opisujący <em>zamiar zmiany stanu</em>: <code>CreateTicketCommand(Title, Priority)</code>. Tryb rozkazujący. Zwykle zwraca mało (id) albo nic.</dd>
+
+  <dt>Query <span class="pl">— zapytanie</span></dt>
+  <dd>Obiekt opisujący <em>prośbę o dane</em>: <code>GetTicketByIdQuery(Id)</code>. Nie zmienia stanu. Zwraca DTO.</dd>
+
+  <dt>Command handler / Query handler</dt>
+  <dd>Klasa z jedną metodą <code>Handle(request, ct)</code>, która wykonuje dany command/query. Jeden handler na jeden typ requestu. Tu mieszka logika use-case'u.</dd>
+
+  <dt>CQRS <span class="pl">— Command Query Responsibility Segregation</span></dt>
+  <dd>Zasada: osobne ścieżki (typy, handlery, czasem modele) dla zapisu i odczytu. W prostym wydaniu = osobne klasy; w skrajnym = osobne bazy.</dd>
+
+  <dt>Mediator / dispatcher</dt>
+  <dd>Obiekt, któremu endpoint oddaje command/query (<code>Send(cmd)</code>), a on znajduje właściwy handler w DI i go wywołuje. Endpoint nie zna handlera. Biblioteki: MediatR, Wolverine, Mediator — albo 30 linii własnego kodu.</dd>
+
+  <dt>Pipeline behavior</dt>
+  <dd>Middleware mediatora: kod uruchamiany wokół <em>każdego</em> handlera (walidacja, logowanie, transakcje). Sygnatura: dostaje request i <code>next()</code>, jak middleware w Express.</dd>
+
+  <dt>Validator <span class="pl">— walidator</span></dt>
+  <dd>Klasa opisująca reguły poprawności requestu, np. <code>RuleFor(x =&gt; x.Title).NotEmpty()</code> (FluentValidation). Uruchamiana w pipeline behavior przed handlerem.</dd>
+</dl>
+
+<h2>Dane</h2>
+<dl class="glossary">
+  <dt>DTO <span class="pl">— Data Transfer Object</span></dt>
+  <dd>Płaski obiekt do przenoszenia danych przez granicę (HTTP, warstwa). W C# zwykle <code>record</code>.</dd>
+
+  <dt>Record</dt>
+  <dd>Typ C# do niemutowalnych danych z równością po wartości: <code>record CreateTicketCommand(string Title);</code>. Idealny na command/query/DTO.</dd>
+
+  <dt>Entity <span class="pl">— encja</span></dt>
+  <dd>Obiekt z tożsamością (Id) i cyklem życia, np. <code>Ticket</code>. Mapowany na tabelę przez EF Core.</dd>
+
+  <dt>DbContext</dt>
+  <dd>Główna klasa EF Core: sesja z bazą + zestaw <code>DbSet&lt;T&gt;</code> (tabel). Rejestrowany jako Scoped.</dd>
+
+  <dt>Migration <span class="pl">— migracja</span></dt>
+  <dd>Wygenerowany kod opisujący zmianę schematu bazy. <code>dotnet ef migrations add Nazwa</code>, potem <code>dotnet ef database update</code>.</dd>
+</dl>
+
+<h2>Składnia C# dla ludzi od TS</h2>
+<table>
+  <thead><tr><th>C#</th><th>TS/JS odpowiednik</th><th>Uwagi</th></tr></thead>
+  <tbody>
+    <tr><td><code>var x = 5;</code></td><td><code>const x = 5;</code></td><td><code>var</code> = inferencja typu, nie „dynamiczny”. Średnik obowiązkowy.</td></tr>
+    <tr><td><code>() =&gt; "hi"</code></td><td><code>() =&gt; "hi"</code></td><td>Lambda. Identyczna składnia.</td></tr>
+    <tr><td><code>new { Id = 1 }</code></td><td><code>{ id: 1 }</code></td><td>Typ anonimowy. Serializuje się do JSON z camelCase.</td></tr>
+    <tr><td><code>record Foo(int Id);</code></td><td><code>type Foo = { readonly id: number }</code></td><td>Plus konstruktor, równość, <code>with</code>.</td></tr>
+    <tr><td><code>string? name</code></td><td><code>name: string | null</code></td><td>Nullable reference types. Bez <code>?</code> kompilator ostrzega przed nullem.</td></tr>
+    <tr><td><code>$"Hi {name}"</code></td><td><code>`Hi ${name}`</code></td><td>Interpolacja.</td></tr>
+    <tr><td><code>async Task&lt;T&gt;</code></td><td><code>async (): Promise&lt;T&gt;</code></td><td><code>Task</code> ≈ <code>Promise</code>. <code>await</code> działa tak samo.</td></tr>
+    <tr><td><code>interface IFoo { }</code></td><td><code>interface Foo { }</code></td><td>Konwencja: prefiks <code>I</code>. Implementacja: <code>class Foo : IFoo</code>.</td></tr>
+    <tr><td><code>List&lt;T&gt;</code>, <code>T[]</code></td><td><code>T[]</code></td><td>List = dynamiczna, tablica = stała długość.</td></tr>
+    <tr><td><code>x.Where(..).Select(..)</code></td><td><code>x.filter(..).map(..)</code></td><td>LINQ. Leniwe — wykonuje się dopiero przy <code>ToList()</code>/iteracji.</td></tr>
+  </tbody>
+</table>
+
+<div class="callout ask">Brakuje terminu, definicja niejasna, albo w firmie używacie słowa inaczej? Powiedz nauczycielowi — słownik ma odzwierciedlać <em>wasz</em> język.</div>
+
+<nav class="lesson-nav">
+  <a href="../lessons/0001-program-cs-od-srodka.html">← Lekcja 0001</a>
+  <a href="../MISSION.md">Misja</a>
+</nav>
+</div>
+</body>
+</html>

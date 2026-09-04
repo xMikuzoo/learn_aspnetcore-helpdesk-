@@ -1,0 +1,43 @@
+# Artefakty kompilacji – odtwarzalne z kodu, tylko puchną w repo
+bin/
+obj/
+[Bb]uild/
+*.dll
+*.exe
+*.pdb
+
+# Ustawienia IDE – lokalne dla użytkownika, powodują konflikty
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userprefs
+
+# Pakiety NuGet – przywracane przez `dotnet restore` na podstawie .csproj
+packages/
+*.nupkg
+project.lock.json
+project.assets.json
+
+# Wyniki testów i pokrycia kodu
+TestResults/
+*.trx
+coverage*.xml
+*.coverage
+
+# Sekrety i konfiguracja środowiskowa – NIGDY nie do repo
+appsettings.*.json
+!appsettings.Development.json
+*.pfx
+.env
+
+# Publikacja / wdrożenie
+publish/
+*.publishsettings
+*.pubxml
+PublishProfiles/
+
+# System operacyjny
+.DS_Store
+Thumbs.db
