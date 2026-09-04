@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DI — ściąga: rejestracja i lifetime'y</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<div class="page">
+<header class="lesson-head">
+  <div class="kicker">Reference · Dependency Injection</div>
+  <h1>DI: rejestracja i czasy życia</h1>
+  <p class="subtitle">Ściąga do druku. Definicje słowo w słowo za <a href="https://learn.microsoft.com/en-us/dotnet/core/extensions/dependency-injection/service-lifetimes">Microsoft Learn — Service lifetimes</a>; przykłady zweryfikowane na .NET 10.0.400.</p>
+  <p class="meta">Ćwiczone w <a href="../lessons/0002-di-lifetimes.html">lekcji 0002</a>.</p>
+</header>
+
+<h2>Trzy czasy życia</h2>
+<table>
+  <thead><tr><th>Lifetime</th><th>Kiedy powstaje instancja</th><th>Kiedy ginie</th><th>Typowe użycie</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><code>AddTransient</code></td>
+      <td>Za <strong>każdym razem</strong>, gdy ktoś o nią poprosi — nawet dwa razy w jednym żądaniu.</td>
+      <td>Na końcu żądania (jeśli <code>IDisposable</code>).</td>
+      <td>Lekkie, bezstanowe helpery. Domyślny wybór, gdy nie wiesz.</td>
+    </tr>
+    <tr>
+      <td><code>AddScoped</code></td>
+      <td><strong>Raz na żądanie</strong> HTTP (per client request / connection).</td>
+      <td>Na końcu żądania.</td>
+      <td><code>DbContext</code>, transakcja, dane bieżącego użytkownika. <code>AddDbContext</code> robi to domyślnie.</td>
+    </tr>
+    <tr>
+      <td><code>AddSingleton</code></td>
+      <td><strong>Raz na proces</strong>, przy pierwszym użyciu (albo od razu, jeśli podasz gotową instancję).</td>
+      <td>Przy zamknięciu aplikacji.</td>
+      <td>Cache, konfiguracja, pule połączeń, stan in-memory. <strong>Musi być thread-safe.</strong></td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout warn">
+  Singleton obsługuje wiele żądań <em>równocześnie, na różnych wątkach</em>. Zwykła <code>List&lt;T&gt;</code> w singletonie to bomba z opóźnionym zapłonem — dopóki tylko czytasz, jest dobrze; przy zapisie potrzebujesz <code>lock</code> albo kolekcji z <code>System.Collections.Concurrent</code>. Docs: „Singleton services must be thread safe”.
+</div>
+
+<h2>Składnia rejestracji</h2>
+<pre><code><span class="cm">// interfejs → implementacja (najczęstsze)</span>
+builder.Services.AddSingleton&lt;ITicketStore, InMemoryTicketStore&gt;();
+
+<span class="cm">// sama klasa, bez interfejsu</span>
+builder.Services.AddScoped&lt;TicketAuditor&gt;();
+
+<span class="cm">// gotowa instancja (zawsze singleton)</span>
+builder.Services.AddSingleton&lt;IClock&gt;(new SystemClock());
+
+<span class="cm">// fabryka — gdy do zbudowania serwisu potrzebujesz innych serwisów</span>
+builder.Services.AddScoped&lt;ITicketStore&gt;(sp =&gt;
+    new InMemoryTicketStore(sp.GetRequiredService&lt;ILogger&lt;InMemoryTicketStore&gt;&gt;()));</code></pre>
+
+<h2>Jak serwis trafia do kodu</h2>
+<pre><code><span class="cm">// 1. Endpoint minimal API — parametr lambdy, typ znany kontenerowi</span>
+app.MapGet("/tickets", (ITicketStore store) =&gt; store.GetAll());
+
+<span class="cm">// 2. Konstruktor innej klasy (primary constructor, C# 12+)</span>
+public class TicketAuditor(ITicketStore store, ILogger&lt;TicketAuditor&gt; log)
+{
+    public int Count() =&gt; store.GetAll().Count;
+}</code></pre>
+<p>Konstruktor to <strong>domyślny i preferowany</strong> sposób. Sięganie po <code>IServiceProvider.GetService()</code> w środku metody to <em>service locator</em> — docs wprost odradzają.<sup class="n">1</sup></p>
+<p class="sidenote"><span class="n">1</span> <a href="https://learn.microsoft.com/en-us/dotnet/core/extensions/dependency-injection-guidelines">DI guidelines</a>, „Avoid using the service locator pattern”.</p>
+
+<h2>Reguła kierunku: krótszy nie może żyć w dłuższym</h2>
+<table>
+  <thead><tr><th>Serwis</th><th>chce wstrzyknąć</th><th>Wynik</th></tr></thead>
+  <tbody>
+    <tr><td>Transient</td><td>Scoped / Singleton</td><td>OK</td></tr>
+    <tr><td>Scoped</td><td>Scoped / Singleton</td><td>OK</td></tr>
+    <tr><td>Singleton</td><td>Singleton</td><td>OK</td></tr>
+    <tr><td><strong>Singleton</strong></td><td><strong>Scoped / Transient</strong></td><td><strong>Captive dependency</strong> — wyjątek w Development</td></tr>
+  </tbody>
+</table>
+<p>Intuicja: instancja trzyma referencję do wstrzykniętej zależności przez całe swoje życie. Singleton żyjący godzinami przytrzymałby <code>DbContext</code> stworzony dla jednego żądania.</p>
+
+<h3>Komunikat, który zobaczysz</h3>
+<pre><code>System.AggregateException: Some services are not able to be constructed
+  (Error while validating the service descriptor
+   'ServiceType: TicketAuditor Lifetime: Singleton ImplementationType: TicketAuditor':
+   Cannot consume scoped service 'IScopedStamp' from singleton 'TicketAuditor'.)
+   ...
+   at Microsoft.AspNetCore.Builder.WebApplicationBuilder.Build()</code></pre>
+<p>Leci z <code>builder.Build()</code> — aplikacja nie wstaje. <strong>Tylko w Development</strong>: walidacja zakresów jest włączona, gdy środowisko to Development.<sup class="n">2</sup> Na produkcji ten sam kod wstanie bez słowa i będzie cicho gubił dane.</p>
+<p class="sidenote"><span class="n">2</span> <a href="https://learn.microsoft.com/en-us/dotnet/core/extensions/dependency-injection/overview#scope-validation">Scope validation</a>: w Development kontener sprawdza, że scoped nie jest rozwiązywany z roota ani wstrzykiwany do singletonu.</p>
+
+<h3>Jak to naprawić — w tej kolejności</h3>
+<ol>
+  <li><strong>Przekaż dane parametrem metody</strong>, zamiast wstrzykiwać je w konstruktorze. Konstruktor mówi „potrzebuję tego przez całe swoje życie”; dane jednego żądania (bieżący użytkownik, correlation id, treść requestu) takie nie są. To rozwiązuje większość przypadków.</li>
+  <li><strong>Sprawdź, czy singleton naprawdę musi być singletonem.</strong> Jeśli nie trzyma stanu współdzielonego — zejdź na Scoped i po sprawie.</li>
+  <li><strong>Dopiero na końcu: twórz scope ręcznie</strong> przez <code>IServiceScopeFactory</code> (patrz niżej). Potrzebne głównie w <code>BackgroundService</code>, gdzie nie ma żadnego żądania HTTP.</li>
+</ol>
+<div class="callout warn">
+  Anty-odruch: „zmienię singleton na scoped, żeby wyjątek zniknął”. Zniknie — razem z sensem serwisu. Licznik, cache czy pula połączeń tworzone od nowa na każde żądanie kompilują się, uruchamiają, nie rzucają błędem i po prostu nie działają. Ta wersja jest gorsza niż crash, bo nikt jej nie zauważy.
+</div>
+
+<h3>Wyjście awaryjne: własny scope</h3>
+<p>Singleton naprawdę potrzebujący czegoś scoped (np. background job) tworzy scope ręcznie:</p>
+<pre><code>public class Worker(IServiceScopeFactory scopeFactory)
+{
+    public void Tick()
+    {
+        using var scope = scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService&lt;AppDbContext&gt;();
+        <span class="cm">// ... db żyje tylko w tym bloku</span>
+    }
+}</code></pre>
+
+<h2>Diagnostyka</h2>
+<table>
+  <thead><tr><th>Objaw</th><th>Prawdopodobna przyczyna</th></tr></thead>
+  <tbody>
+    <tr><td><code>Cannot consume scoped service 'X' from singleton 'Y'</code></td><td>Captive dependency. Zmień lifetime <code>Y</code> na Scoped albo wstrzyknij <code>IServiceScopeFactory</code>.</td></tr>
+    <tr><td><code>Unable to resolve service for type 'X'</code></td><td>Zapomniana rejestracja w <code>builder.Services</code>, albo rejestrujesz klasę a wstrzykujesz interfejs.</td></tr>
+    <tr><td>Zapis „przechodzi”, ale po odświeżeniu znika</td><td>Stan w serwisie zarejestrowanym jako Scoped/Transient. Nowa instancja na każde żądanie = czysta lista.</td></tr>
+    <tr><td>Dane jednego użytkownika widoczne u innego</td><td>Stan per-user w Singletonie.</td></tr>
+    <tr><td>Losowe wyjątki z kolekcji pod obciążeniem</td><td>Nie-thread-safe <code>List</code>/<code>Dictionary</code> w Singletonie.</td></tr>
+  </tbody>
+</table>
+
+<h2>Reguła kciuka przy wyborze</h2>
+<ol>
+  <li>Serwis trzyma <strong>stan współdzielony przez wszystkich</strong> (cache, in-memory repo)? → <strong>Singleton</strong>, i zadbaj o thread-safety.</li>
+  <li>Serwis trzyma <strong>stan jednego żądania</strong> (transakcja, <code>DbContext</code>, tożsamość usera)? → <strong>Scoped</strong>.</li>
+  <li>Serwis jest <strong>bezstanowy</strong>? → Transient lub Scoped; różnica to głównie alokacje. Docs odradzają Singleton dla serwisów bez własnego stanu.</li>
+</ol>
+
+<nav class="lesson-nav">
+  <a href="glossary.html">← Glossary</a>
+  <a href="../lessons/0002-di-lifetimes.html">Lekcja 0002 →</a>
+</nav>
+</div>
+</body>
+</html>

@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>0002 · DI i czasy życia — ASP.NET Core dla frontendowca</title>
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/quiz.js" defer></script>
+<script src="../assets/checklist.js" defer></script>
+</head>
+<body>
+<div class="page">
+<header class="lesson-head">
+  <div class="kicker">Lekcja 0002 · ~20 min · projekt Helpdesk</div>
+  <h1>Dependency Injection: kto tworzy twoje obiekty</h1>
+  <p class="subtitle">Cel: wyciągnąć listę zgłoszeń z <code>Program.cs</code> do serwisu, zarejestrować go w kontenerze i zobaczyć na własne oczy — na wydruku z przeglądarki — czym różni się Singleton od Scoped i Transient.</p>
+  <p class="meta">Wymaga: <a href="0001-program-cs-od-srodka.html">lekcji 0001</a> (granica <code>builder.Build()</code>). Ściąga do tej lekcji: <a href="../reference/di-lifetimes.html">DI — rejestracja i czasy życia</a>.</p>
+</header>
+
+<h2>Zacznijmy od tego, co już napisałeś</h2>
+<p>W lekcji 0001 wylądowało w <code>Program.cs</code> to:</p>
+<pre><code>var tickets = new[] { new { Id = 1, Title = "Pierwsze zgłoszenie" }, … };
+
+app.MapGet("/tickets", () =&gt; tickets);</code></pre>
+<p>To działa. I — przypadkiem — jest już singletonem: lambda <em>domyka</em> (closure) zmienną <code>tickets</code>, więc jedna tablica obsługuje wszystkie żądania przez całe życie procesu. Problem nie w tym, że to singleton. Problem w tym, że <strong>nikt tego nie zdecydował</strong>. Nie da się tego zmienić bez przepisania endpointu, nie da się podmienić na bazę danych, nie da się przetestować bez startowania serwera.</p>
+<p>DI odwraca sytuację: klasa mówi <em>czego potrzebuje</em>, a kontener mówi <em>skąd to wziąć i jak długo ma żyć</em>. Te dwie decyzje przestają być jedną linijką kodu.</p>
+
+<div class="callout analogy">
+  <code>provide()</code> / <code>inject()</code> z Vue to ten sam pomysł: komponent deklaruje potrzebę, ktoś wyżej dostarcza. Różnice: w C# kluczem jest <strong>typ</strong>, nie string, więc kompilator łapie literówki; wstrzykiwanie idzie przez konstruktor, nie przez wywołanie w setupie; i dochodzi wymiar, którego Vue nie ma — <strong>czas życia</strong>. Bliżej ci do Angulara (<code>@Injectable</code>, <code>providedIn</code>) albo NestJS.
+</div>
+
+<h2>Krok 1: serwis</h2>
+<p>Trzy nowe pliki obok <code>Program.cs</code>. Nie kopiuj — przepisz.</p>
+
+<p class="filename">project/Helpdesk/Ticket.cs</p>
+<pre><code><span class="kw">public record</span> <span class="ty">Ticket</span>(<span class="kw">int</span> Id, <span class="kw">string</span> Title);</code></pre>
+<p><code>record</code> to klasa z gotowym konstruktorem, porównywaniem po wartości i czytelnym <code>ToString()</code>. Jedna linia zastępuje twój obiekt anonimowy — z tą różnicą, że ten typ ma nazwę, więc można go zwracać z metody.<sup class="n">1</sup></p>
+<p class="sidenote"><span class="n">1</span> Typy anonimowe nie mają nazwy, więc nie da się ich zadeklarować jako typ zwracany. Dlatego przy pierwszym interfejsie musi pojawić się <code>record</code> albo <code>class</code>.</p>
+
+<p class="filename">project/Helpdesk/ITicketStore.cs</p>
+<pre><code><span class="kw">public interface</span> <span class="ty">ITicketStore</span>
+{
+    <span class="ty">IReadOnlyList</span>&lt;<span class="ty">Ticket</span>&gt; GetAll();
+    <span class="ty">Ticket</span>? GetById(<span class="kw">int</span> id);
+    <span class="ty">Ticket</span> Add(<span class="kw">string</span> title);
+}</code></pre>
+<p>Interfejs = <code>interface</code> z TS, tylko że w C# klasa musi go zadeklarować jawnie (<code>: ITicketStore</code>) — nie ma structural typing. <code>Ticket?</code> ze znakiem zapytania to <em>nullable reference type</em>: sygnatura mówi „może zwrócić null, obsłuż to”. Kompilator ostrzeże, jeśli zignorujesz. Włącza to <code>&lt;Nullable&gt;enable&lt;/Nullable&gt;</code> w twoim <code>.csproj</code>.</p>
+
+<p class="filename">project/Helpdesk/InMemoryTicketStore.cs</p>
+<pre><code><span class="kw">public class</span> <span class="ty">InMemoryTicketStore</span> : <span class="ty">ITicketStore</span>
+{
+    <span class="kw">private readonly</span> <span class="ty">List</span>&lt;<span class="ty">Ticket</span>&gt; _tickets =
+    [
+        <span class="kw">new</span> <span class="ty">Ticket</span>(1, <span class="str">"Pierwsze zgłoszenie"</span>),
+        <span class="kw">new</span> <span class="ty">Ticket</span>(2, <span class="str">"Drugie zgłoszenie!"</span>)
+    ];
+
+    <span class="kw">public</span> <span class="ty">IReadOnlyList</span>&lt;<span class="ty">Ticket</span>&gt; GetAll() =&gt; _tickets;
+
+    <span class="kw">public</span> <span class="ty">Ticket</span>? GetById(<span class="kw">int</span> id) =&gt; _tickets.FirstOrDefault(t =&gt; t.Id == id);
+
+    <span class="kw">public</span> <span class="ty">Ticket</span> Add(<span class="kw">string</span> title)
+    {
+        <span class="kw">var</span> ticket = <span class="kw">new</span> <span class="ty">Ticket</span>(_tickets.Count + 1, title);
+        _tickets.Add(ticket);
+        <span class="kw">return</span> ticket;
+    }
+}</code></pre>
+<ul>
+  <li><code>_tickets</code> — podkreślenie i camelCase to konwencja dla pól prywatnych; twój <code>.editorconfig</code> tego pilnuje i zgłosi warning, jeśli nazwiesz inaczej.</li>
+  <li><code>[ … ]</code> to <em>collection expression</em> (C# 12): skrócone <code>new List&lt;Ticket&gt; { … }</code>. Typ bierze z lewej strony.</li>
+  <li><code>=&gt;</code> zamiast <code>{ return …; }</code> to <em>expression-bodied member</em> — jednolinijkowe ciało metody.</li>
+  <li><code>readonly</code> znaczy „referencja się nie zmieni”, nie „lista jest niezmienna”. Do listy nadal można dopisywać — dokładnie jak <code>const arr = []</code> w JS.</li>
+</ul>
+
+<h2>Krok 2: rejestracja i wstrzyknięcie</h2>
+<p>W <code>Program.cs</code>, <strong>przed</strong> <code>builder.Build()</code> — pamiętasz granicę z lekcji 0001:</p>
+<pre><code>builder.Services.AddSingleton&lt;<span class="ty">ITicketStore</span>, <span class="ty">InMemoryTicketStore</span>&gt;();</code></pre>
+<p>Czytaj to jako: „gdy ktoś poprosi o <code>ITicketStore</code>, daj mu <code>InMemoryTicketStore</code> — zawsze tę samą instancję”. Potem, w endpointach:</p>
+<pre><code>app.MapGet(<span class="str">"/tickets"</span>, (<span class="ty">ITicketStore</span> store) =&gt; store.GetAll());
+
+app.MapGet(<span class="str">"/tickets/{id}"</span>, (<span class="kw">int</span> id, <span class="ty">ITicketStore</span> store) =&gt;
+{
+    <span class="kw">var</span> ticket = store.GetById(id);
+    <span class="kw">return</span> ticket <span class="kw">is null</span> ? <span class="ty">Results</span>.NotFound() : <span class="ty">Results</span>.Ok(ticket);
+});
+
+app.MapPost(<span class="str">"/tickets"</span>, (<span class="kw">string</span> title, <span class="ty">ITicketStore</span> store) =&gt; <span class="ty">Results</span>.Ok(store.Add(title)));</code></pre>
+<p>Skąd framework wie, że <code>int id</code> ma wziąć z trasy, <code>string title</code> z query stringa, a <code>ITicketStore store</code> z kontenera? Reguła: jeśli typ parametru jest <strong>zarejestrowany w DI</strong>, minimal API bierze go z kontenera; typy proste (<code>int</code>, <code>string</code>) idą z trasy lub query.<sup class="n">2</sup> Kolejność parametrów nie ma znaczenia.</p>
+<p class="sidenote"><span class="n">2</span> Od .NET 7 nie trzeba już atrybutu <code>[FromServices]</code> — kontener jest sprawdzany automatycznie. W starszym kodzie firmowym ten atrybut jeszcze zobaczysz.</p>
+
+<h2>Krok 3: zobacz różnicę na własne oczy</h2>
+<p>Definicje lifetime'ów da się wykuć i zapomnieć. Lepiej je <em>zobaczyć</em>. Dodaj plik:</p>
+
+<p class="filename">project/Helpdesk/Stamp.cs</p>
+<pre><code><span class="kw">public interface</span> <span class="ty">IStamp</span> { <span class="kw">string</span> Id { <span class="kw">get</span>; } }
+<span class="kw">public interface</span> <span class="ty">ITransientStamp</span> : <span class="ty">IStamp</span>;
+<span class="kw">public interface</span> <span class="ty">IScopedStamp</span> : <span class="ty">IStamp</span>;
+<span class="kw">public interface</span> <span class="ty">ISingletonStamp</span> : <span class="ty">IStamp</span>;
+
+<span class="kw">public class</span> <span class="ty">Stamp</span> : <span class="ty">ITransientStamp</span>, <span class="ty">IScopedStamp</span>, <span class="ty">ISingletonStamp</span>
+{
+    <span class="kw">public</span> <span class="kw">string</span> Id { <span class="kw">get</span>; } = <span class="ty">Guid</span>.NewGuid().ToString()[^4..];
+}</code></pre>
+<p>Jedna klasa, trzy puste interfejsy-znaczniki — tylko po to, żeby ten sam typ dało się zarejestrować trzy razy z trzema różnymi lifetime'ami. Każda instancja dostaje przy tworzeniu losowy 4-znakowy identyfikator.<sup class="n">3</sup> <code>[^4..]</code> to <em>range operator</em>: „ostatnie cztery znaki”, odpowiednik <code>str.slice(-4)</code>.</p>
+<p class="sidenote"><span class="n">3</span> Ten eksperyment to uproszczona wersja oficjalnego przykładu Microsoftu (<code>IOperationTransient</code> / <code>Scoped</code> / <code>Singleton</code>) z <a href="https://learn.microsoft.com/en-us/aspnet/core/fundamentals/dependency-injection?view=aspnetcore-10.0#lifetime-and-registration-options">Lifetime and registration options</a>.</p>
+
+<p>Rejestracja i endpoint:</p>
+<pre><code>builder.Services.AddTransient&lt;<span class="ty">ITransientStamp</span>, <span class="ty">Stamp</span>&gt;();
+builder.Services.AddScoped&lt;<span class="ty">IScopedStamp</span>, <span class="ty">Stamp</span>&gt;();
+builder.Services.AddSingleton&lt;<span class="ty">ISingletonStamp</span>, <span class="ty">Stamp</span>&gt;();</code></pre>
+<pre><code>app.MapGet(<span class="str">"/lifetimes"</span>, (
+    <span class="ty">ITransientStamp</span> t1, <span class="ty">ITransientStamp</span> t2,
+    <span class="ty">IScopedStamp</span> s1, <span class="ty">IScopedStamp</span> s2,
+    <span class="ty">ISingletonStamp</span> g1) =&gt; <span class="kw">new</span>
+    {
+        transient1 = t1.Id, transient2 = t2.Id,
+        scoped1 = s1.Id, scoped2 = s2.Id,
+        singleton = g1.Id
+    });</code></pre>
+
+<p>Odśwież <code>/lifetimes</code> trzy razy. Zobaczysz coś takiego (to prawdziwy wynik z tej samej konfiguracji na .NET 10.0.400):</p>
+<pre><code>{"transient1":"e4b2","transient2":"32b9","scoped1":"6ee9","scoped2":"6ee9","singleton":"b31f"}
+{"transient1":"ee53","transient2":"8f58","scoped1":"de1f","scoped2":"de1f","singleton":"b31f"}
+{"transient1":"fb3e","transient2":"849c","scoped1":"2c75","scoped2":"2c75","singleton":"b31f"}</code></pre>
+<p>Czytaj to <strong>w dwóch osiach</strong> — to jest cała lekcja:</p>
+<table>
+  <thead><tr><th></th><th>W jednym żądaniu (w poziomie)</th><th>Między żądaniami (w pionie)</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Transient</strong></td><td>różne — <code>t1</code> ≠ <code>t2</code></td><td>różne</td></tr>
+    <tr><td><strong>Scoped</strong></td><td>te same — <code>s1</code> = <code>s2</code></td><td>różne</td></tr>
+    <tr><td><strong>Singleton</strong></td><td>ta sama</td><td>ta sama — <code>b31f</code> aż do restartu</td></tr>
+  </tbody>
+</table>
+<p>„Scope” w ASP.NET Core to <strong>jedno żądanie HTTP</strong>. Framework tworzy go, zanim wejdzie do twojego handlera, i wyrzuca po odesłaniu odpowiedzi.</p>
+
+<h2>Krok 4: konflikt, który zobaczysz w pracy</h2>
+<p>Do tej pory każdy serwis miał jeden oczywisty lifetime. Prawdziwe kłopoty zaczynają się, gdy <strong>dwa serwisy o różnym czasie życia muszą ze sobą rozmawiać</strong>. Zbudujemy dokładnie taką parę — obie klasy mają konkretną robotę.</p>
+
+<p class="filename">project/Helpdesk/ICurrentUser.cs — kto wysłał <em>to</em> żądanie</p>
+<pre><code><span class="kw">public interface</span> <span class="ty">ICurrentUser</span>
+{
+    <span class="kw">string</span> Name { <span class="kw">get</span>; }
+}
+
+<span class="kw">public class</span> <span class="ty">HeaderCurrentUser</span>(<span class="ty">IHttpContextAccessor</span> accessor) : <span class="ty">ICurrentUser</span>
+{
+    <span class="kw">public</span> <span class="kw">string</span> Name =&gt;
+        accessor.HttpContext?.Request.Headers[<span class="str">"X-User"</span>].ToString() <span class="kw">is</span> { Length: &gt; 0 } name
+            ? name
+            : <span class="str">"anonim"</span>;
+}</code></pre>
+<p>Nazwisko użytkownika bieżącego żądania. W prawdziwej aplikacji przyszłoby z tokena albo cookie; tutaj wystarczy nagłówek <code>X-User</code>, żeby dało się to sprawdzić curlem. <strong>Musi być Scoped</strong> — „bieżący użytkownik” istnieje tylko w kontekście jednego żądania. Rejestracja wymaga jeszcze <code>builder.Services.AddHttpContextAccessor();</code>.</p>
+
+<p class="filename">project/Helpdesk/TicketMetrics.cs — ile zgłoszeń powstało od startu</p>
+<pre><code><span class="kw">public class</span> <span class="ty">TicketMetrics</span>(<span class="ty">ICurrentUser</span> user)
+{
+    <span class="kw">private</span> <span class="kw">int</span> _created;
+
+    <span class="kw">public</span> <span class="kw">int</span> Created =&gt; _created;
+
+    <span class="kw">public</span> <span class="kw">void</span> RecordCreated()
+    {
+        _created++;
+        <span class="ty">Console</span>.WriteLine($<span class="str">"[metrics] {user.Name} utworzył zgłoszenie; łącznie od startu: {_created}"</span>);
+    }
+}</code></pre>
+<p>Licznik dla całej instancji aplikacji, wystawiany przez <code>GET /metrics</code>. <strong>Musi być Singletonem</strong> — licznik zerujący się co żądanie nie jest licznikiem. Wywołaj <code>metrics.RecordCreated()</code> w endpoincie <code>MapPost("/tickets")</code>, dodaj <code>app.MapGet("/metrics", (TicketMetrics m) =&gt; new { created = m.Created });</code> i zarejestruj: <code>builder.Services.AddSingleton&lt;TicketMetrics&gt;();</code></p>
+
+<p>Widzisz konflikt? Singleton (<code>TicketMetrics</code>) chce w konstruktorze coś, co żyje jedno żądanie (<code>ICurrentUser</code>). Uruchom:</p>
+<pre><code>System.AggregateException: Some services are not able to be constructed
+ (Error while validating the service descriptor
+  'ServiceType: TicketMetrics Lifetime: Singleton ImplementationType: TicketMetrics':
+  Cannot consume scoped service 'ICurrentUser' from singleton 'TicketMetrics'.)
+   ...
+   at Microsoft.AspNetCore.Builder.WebApplicationBuilder.Build()</code></pre>
+<p>To <strong>captive dependency</strong>: singleton przytrzymałby („uwięziłby”) obiekt stworzony na jedno żądanie i używał go we wszystkich następnych. Twój licznik raportowałby w nieskończoność użytkownika, który akurat trafił jako pierwszy. Zwróć uwagę <em>gdzie</em> to wybucha — w <code>builder.Build()</code>. Ta sama linia, która w lekcji 0001 była granicą dwóch faz, jest też momentem, w którym kontener sprawdza spójność wszystkich rejestracji.</p>
+<div class="callout warn">
+  Ta walidacja działa <strong>tylko w Development</strong>. Ten sam kod na produkcji wstanie bez jednego słowa. Dlatego nigdy nie „naprawiaj” tego wyjątku przez zmianę środowiska — to jedyny moment, w którym framework mówi ci prawdę.
+</div>
+
+<h3>Dwa wyjścia — i tylko jedno jest wyjściem</h3>
+<p><strong>Droga A: obniż lifetime singletona.</strong> <code>AddScoped&lt;TicketMetrics&gt;()</code> — wyjątek znika, aplikacja wstaje. Zrób dwa POST-y i sprawdź <code>/metrics</code>. Prawdziwy wynik:</p>
+<pre><code>konsola:  [metrics] wojtek utworzył zgłoszenie; łącznie od startu: 1
+konsola:  [metrics] wojtek utworzył zgłoszenie; łącznie od startu: 1
+GET /metrics  →  {"created":0}</code></pre>
+<p>Licznik dwa razy naliczył „pierwsze” zgłoszenie, a endpoint raportuje zero — bo każde żądanie dostało świeży, wyzerowany <code>TicketMetrics</code>. Kompiluje się, uruchamia, nie rzuca wyjątkiem i <strong>jest bezużyteczne</strong>. To jest ta sama pułapka co przy <code>ITicketStore</code> jako Scoped, tylko lepiej ukryta. Zapamiętaj to: <em>„zszedłem z lifetime'em, żeby zniknął wyjątek” prawie zawsze znaczy „zepsułem serwis, żeby zniknął wyjątek”.</em></p>
+
+<p><strong>Droga B: nie wstrzykuj tego, co krótko żyje — podaj to w wywołaniu.</strong> Usuń zależność z konstruktora, przyjmij użytkownika jako argument metody:</p>
+<pre><code><span class="kw">public class</span> <span class="ty">TicketMetrics</span>
+{
+    <span class="kw">private</span> <span class="kw">int</span> _created;
+    <span class="kw">public</span> <span class="kw">int</span> Created =&gt; _created;
+
+    <span class="kw">public</span> <span class="kw">void</span> RecordCreated(<span class="kw">string</span> user) { … }
+}</code></pre>
+<p>a <code>ICurrentUser</code> wstrzyknij do <em>endpointu</em>, który i tak żyje jedno żądanie:</p>
+<pre><code>app.MapPost(<span class="str">"/tickets"</span>, (<span class="kw">string</span> title, <span class="ty">ITicketStore</span> store,
+                        <span class="ty">TicketMetrics</span> metrics, <span class="ty">ICurrentUser</span> user) =&gt;
+{
+    <span class="kw">var</span> ticket = store.Add(title);
+    metrics.RecordCreated(user.Name);
+    <span class="kw">return</span> <span class="ty">Results</span>.Ok(ticket);
+});</code></pre>
+<p>Prawdziwy wynik po trzech POST-ach z różnymi nagłówkami <code>X-User</code>:</p>
+<pre><code>konsola:  [metrics] wojtek utworzył zgłoszenie; łącznie od startu: 1
+konsola:  [metrics] ania utworzył zgłoszenie; łącznie od startu: 2
+konsola:  [metrics] anonim utworzył zgłoszenie; łącznie od startu: 3
+GET /metrics  →  {"created":3}</code></pre>
+<p>Licznik jest jeden na aplikację, użytkownik prawidłowy przy każdym zapisie. <strong>Reguła, którą warto zabrać do pracy:</strong> stan długowieczny trzymaj w polu serwisu, dane jednego żądania przekazuj parametrem. Wstrzykiwanie przez konstruktor to deklaracja „potrzebuję tego przez całe swoje życie” — a bieżący użytkownik nigdy taki nie jest.<sup class="n">4</sup></p>
+<p class="sidenote"><span class="n">4</span> Trzecia droga, na później: singleton, który <em>naprawdę</em> musi sięgnąć po coś scoped (np. zadanie w tle), wstrzykuje <code>IServiceScopeFactory</code> i tworzy scope ręcznie. Wzorzec jest w <a href="../reference/di-lifetimes.html">ściądze</a>.</p>
+<p class="callout">Obie klasy pokazują przy okazji <strong>primary constructor</strong> (C# 12): parametry zapisane po nazwie klasy są dostępne w całym jej ciele, bez pisania pól i przypisań. W firmowym kodzie zobaczysz obie formy — starą i tę.</p>
+
+<div class="task">
+  <h3>Zadanie</h3>
+  <ol>
+    <li>Przepisz pliki z kroków 1 i 3. Przełącz oba endpointy <code>/tickets</code> na <code>ITicketStore</code>. Sprawdź, że działają tak jak wcześniej.</li>
+    <li>Odśwież <code>/lifetimes</code> co najmniej trzy razy. Zanim spojrzysz na wynik — powiedz na głos, które cztery z pięciu identyfikatorów się zmienią.</li>
+    <li><strong>Decyzja projektowa</strong>: w <code>Program.cs</code> czeka <code>TODO(human)</code> — musisz wybrać lifetime dla <code>ITicketStore</code>. Zanim wybierzesz, zrób eksperyment: zarejestruj jako <code>AddScoped</code>, dodaj zgłoszenie przez <code>POST /tickets?title=Test</code>, potem wejdź na <code>GET /tickets</code>. Zobacz, co się stało. Potem to samo z <code>AddSingleton</code>. Zostaw ten, który jest poprawny, i dopisz nad linią komentarz — jedno zdanie, dlaczego.</li>
+    <li>Dodaj <code>ICurrentUser</code> i <code>TicketMetrics</code> z kroku 4, zarejestruj metryki jako singleton i przeczytaj wyjątek. Potem przejdź obie drogi naprawy po kolei — <strong>A</strong> (metryki jako Scoped: sprawdź konsolę i <code>/metrics</code> po dwóch POST-ach) i <strong>B</strong> (użytkownik jako parametr metody). Zostaw wersję, która faktycznie liczy. Testuj nagłówkiem: <code>curl -X POST -H "X-User: wojtek" "http://localhost:5006/tickets?title=Test"</code>.</li>
+  </ol>
+  <div class="check">
+    <label><input type="checkbox" id="c1"> <code>/tickets</code> i <code>/tickets/1</code> działają przez <code>ITicketStore</code></label>
+    <label><input type="checkbox" id="c2"> Widziałem, że <code>scoped1</code> = <code>scoped2</code> w jednym żądaniu, a różne między żądaniami</label>
+    <label><input type="checkbox" id="c3"> Widziałem, jak POST „przechodzi”, a dane znikają przy Scoped</label>
+    <label><input type="checkbox" id="c4"> Przeczytałem wyjątek „Cannot consume scoped service … from singleton …”</label>
+    <label><input type="checkbox" id="c6"> Widziałem, że droga A usuwa wyjątek i psuje licznik, a droga B naprawia jedno i drugie</label>
+    <label><input type="checkbox" id="c5"> Wybrałem lifetime dla <code>ITicketStore</code> i uzasadniłem komentarzem</label>
+  </div>
+</div>
+
+<h2>Sprawdź się</h2>
+<p>Odpowiedz zanim klikniesz. Zła odpowiedź nie zdradza dobrej — spróbuj jeszcze raz.</p>
+
+<div class="quiz" id="q1" data-answer="2">
+  <div class="q">Serwis <code>Scoped</code> wstrzyknięty dwa razy do jednego handlera daje:</div>
+  <button class="opt">Dwie osobne instancje</button>
+  <button class="opt">Instancję i jej kopię</button>
+  <button class="opt">Dwa razy tę samą</button>
+  <div class="why">Scope to jedno żądanie HTTP. W jego obrębie kontener zwraca tę samą instancję, ile razy by o nią nie poproszono — stąd <code>s1</code> = <code>s2</code> w wydruku.</div>
+</div>
+
+<div class="quiz" id="q2" data-answer="0">
+  <div class="q">Singleton wstrzykuje w konstruktorze serwis Scoped. Co się dzieje?</div>
+  <button class="opt">Wyjątek przy starcie w Development</button>
+  <button class="opt">Wyjątek przy pierwszym żądaniu</button>
+  <button class="opt">Kompilator zgłasza błąd typu</button>
+  <div class="why">Kontener waliduje deskryptory w <code>builder.Build()</code>, więc aplikacja nie wstaje. Kompilator nic nie widzi — lifetime to informacja runtime'owa, nie część typu. Na produkcji walidacja jest wyłączona i błąd przechodzi cicho.</div>
+</div>
+
+<div class="quiz" id="q3" data-answer="1">
+  <div class="q">Który serwis <em>musi</em> być napisany w sposób thread-safe?</div>
+  <button class="opt">Zarejestrowany jako Scoped</button>
+  <button class="opt">Zarejestrowany jako Singleton</button>
+  <button class="opt">Każdy serwis z polami</button>
+  <div class="why">Singleton obsługuje wiele żądań równocześnie, na różnych wątkach. Scoped ma jedną instancję na żądanie, więc nie jest współdzielony. Docs: „Singleton services must be thread safe”.</div>
+</div>
+
+<div class="quiz" id="q4" data-answer="2">
+  <div class="q">Skąd minimal API wie, że <code>ITicketStore store</code> to serwis, a nie ciało żądania?</div>
+  <button class="opt">Z atrybutu na parametrze</button>
+  <button class="opt">Bo to jest interfejs</button>
+  <button class="opt">Bo typ jest w kontenerze</button>
+  <div class="why">Od .NET 7 binder najpierw pyta kontener DI. Zarejestrowany typ → wstrzyknięcie; niezarejestrowany typ złożony → próba deserializacji z body. Stąd „Unable to resolve service…” przy zapomnianej rejestracji.</div>
+</div>
+
+<div class="quiz" id="q5" data-answer="1">
+  <div class="q">Singleton potrzebuje danych bieżącego żądania. Właściwa reakcja:</div>
+  <button class="opt">Zmienić go na Scoped</button>
+  <button class="opt">Przekazać je parametrem</button>
+  <button class="opt">Wstrzyknąć je w kontenerze</button>
+  <div class="why">Obniżenie lifetime'u usuwa wyjątek i przy okazji odbiera serwisowi sens — licznik zerowałby się co żądanie. Wstrzyknięcie przez konstruktor to deklaracja „potrzebuję tego przez całe życie”, a dane żądania takie nie są. Zostaje trzecia opcja: podać je w wywołaniu metody.</div>
+</div>
+
+<details class="recall">
+  <summary>Czym różni się Transient od Scoped w jednym żądaniu HTTP?</summary>
+  <p>Transient tworzy nową instancję przy <em>każdym</em> rozwiązaniu — dwa parametry tego samego typu w jednym handlerze dostają dwie różne instancje. Scoped tworzy jedną na całe żądanie i zwraca ją wszystkim.</p>
+</details>
+
+<details class="recall">
+  <summary>Dlaczego singleton nie może przyjąć scoped w konstruktorze?</summary>
+  <p>Bo przytrzymałby tę instancję na całe życie aplikacji. Obiekt stworzony dla jednego żądania obsługiwałby wszystkie następne — czyli np. <code>DbContext</code> z zamkniętą transakcją i nieaktualnym cache. To captive dependency; odwrotny kierunek (scoped bierze singleton) jest bezpieczny.</p>
+</details>
+
+<details class="recall">
+  <summary>Co robi <code>builder.Services.AddScoped&lt;ITicketStore, InMemoryTicketStore&gt;()</code>?</summary>
+  <p>Nic nie tworzy. Zapisuje w kolekcji <em>deskryptor</em>: „typ usługi <code>ITicketStore</code>, implementacja <code>InMemoryTicketStore</code>, lifetime Scoped”. Instancja powstanie dopiero, gdy ktoś o nią poprosi.</p>
+</details>
+
+<h2>Źródło pierwotne</h2>
+<div class="callout source">
+  <a href="https://learn.microsoft.com/en-us/dotnet/core/extensions/dependency-injection/service-lifetimes">Microsoft Learn — Service lifetimes</a>. Krótka strona, ~5 min, przeczytaj całą; wszystkie definicje z tej lekcji są stamtąd. Potem <a href="https://learn.microsoft.com/en-us/dotnet/core/extensions/dependency-injection-guidelines">DI guidelines</a> — sekcja <em>Example anti-patterns</em> pokazuje captive dependency na diagramie, a <em>Recommendations</em> to lista rzeczy, za które dostaniesz uwagę na code review. Kontekst webowy (scope = żądanie): <a href="https://learn.microsoft.com/en-us/aspnet/core/fundamentals/dependency-injection?view=aspnetcore-10.0">Dependency injection in ASP.NET Core</a>.
+</div>
+
+<div class="callout ask">Coś niejasne — dziwny wyjątek, wynik <code>/lifetimes</code> inny niż w tabelce, nie wiadomo, co wybrać dla <code>ITicketStore</code>? Wklej to nauczycielowi w terminalu (Claude Code w <code>C:\PLAYGROUND\asp</code>). Dobre pytanie do seniora w pracy: <em>„jaki lifetime mają u nas repozytoria i dlaczego?”</em> — odpowiedź powie ci o architekturze więcej niż godzina czytania kodu.</div>
+
+<h2>Co dalej</h2>
+<p>Lekcja 0003: pełny CRUD na <code>ITicketStore</code> — <code>MapPost</code> z ciałem żądania zamiast query stringa, <code>TypedResults</code> zamiast <code>Results</code>, kody 201/204 i <code>MapGroup("/tickets")</code>, żeby przestać powtarzać prefiks trasy. To ostatni krok, zanim <code>Program.cs</code> zrobi się za długi — i właśnie dlatego lekcja 0004 rozbije go na vertical slices.</p>
+
+<nav class="lesson-nav">
+  <a href="0001-program-cs-od-srodka.html">← Lekcja 0001</a>
+  <a href="../reference/di-lifetimes.html">Ściąga: DI</a>
+  <a href="0003-crud-typedresults.html">Lekcja 0003 →</a>
+</nav>
+</div>
+</body>
+</html>
