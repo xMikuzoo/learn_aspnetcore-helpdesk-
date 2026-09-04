@@ -15,6 +15,6 @@ public static class UpdateTicketEndpoint
         CancellationToken cancellationToken)
     {
         var updated = await handler.HandleAsync(new UpdateTicketCommand(id, request.Title), cancellationToken);
-        return updated ? TypedResults.NotFound() : TypedResults.NotFound();
+        return updated ? TypedResults.NoContent() : TypedResults.NotFound();
     }
 }
