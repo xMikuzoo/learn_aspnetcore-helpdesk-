@@ -1,3 +1,4 @@
+using Helpdesk.Features.Diagnostics.Lifetimes;
 
 namespace Helpdesk.Features.Diagnostics;
 
@@ -13,21 +14,10 @@ public static class DiagnosticsFeature
 
     public static RouteGroupBuilder MapDiagnostics(this IEndpointRouteBuilder app)
     {
-        var diagnostics = app.MapGroup("/diagnostics");
+        var diagnostics = app.MapGroup("/diagnostics").WithTags("Diagnostics");
 
-        diagnostics.MapGet("/lifetimes", (
-            ITransientStamp t1, ITransientStamp t2,
-            IScopedStamp s1, IScopedStamp s2,
-            ISingletonStamp g1) => new
-            {
-                transient1 = t1.Id,
-                transient2 = t2.Id,
-                scoped1 = s1.Id,
-                scoped2 = s2.Id,
-                singleton = g1.Id
-            });
+        LifetimesEndpoint.Map(diagnostics);
 
         return diagnostics;
     }
-
 }

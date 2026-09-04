@@ -1,5 +1,10 @@
 using Helpdesk.Common;
-using Microsoft.AspNetCore.Http.HttpResults;
+using Helpdesk.Features.Tickets.Commands.CreateTicket;
+using Helpdesk.Features.Tickets.Commands.DeleteTicket;
+using Helpdesk.Features.Tickets.Commands.UpdateTicket;
+using Helpdesk.Features.Tickets.Queries.GetTicket;
+using Helpdesk.Features.Tickets.Queries.GetTicketMetrics;
+using Helpdesk.Features.Tickets.Queries.ListTickets;
 
 namespace Helpdesk.Features.Tickets;
 
@@ -10,64 +15,28 @@ public static class TicketsFeature
         services.AddSingleton<ITicketStore, InMemoryTicketStore>();
         services.AddSingleton<TicketMetrics>();
 
-        services.AddScoped<ICommandHandler<CreateTicketCommand, Ticket>, CreateTicketHandler>();
-        services.AddScoped<IQueryHandler<GetTicketQuery, Ticket?>, GetTicketHandler>();
+        services.AddScoped<ICommandHandler<CreateTicketCommand, TicketDto>, CreateTicketHandler>();
+        services.AddScoped<ICommandHandler<UpdateTicketCommand, bool>, UpdateTicketHandler>();
+        services.AddScoped<ICommandHandler<DeleteTicketCommand, bool>, DeleteTicketHandler>();
+
+        services.AddScoped<IQueryHandler<GetTicketQuery, TicketDto?>, GetTicketHandler>();
+        services.AddScoped<IQueryHandler<ListTicketsQuery, IReadOnlyList<TicketDto>>, ListTicketsHandler>();
+        services.AddScoped<IQueryHandler<GetTicketMetricsQuery, TicketMetricsDto>, GetTicketMetricsHandler>();
 
         return services;
     }
 
     public static RouteGroupBuilder MapTickets(this IEndpointRouteBuilder app)
     {
-        var tickets = app.MapGroup("/tickets");
+        var tickets = app.MapGroup("/tickets").WithTags("Tickets");
 
-        tickets.MapGet("/", (ITicketStore store) => store.GetAll());
-
-        tickets.MapGet("/{id:int}",
-            async Task<Results<Ok<Ticket>, NotFound>> (
-                int id,
-                IQueryHandler<GetTicketQuery, Ticket?> handler,
-                CancellationToken cancellationToken) =>
-            {
-                var ticket = await handler.HandleAsync(new GetTicketQuery(id), cancellationToken);
-                if (ticket is { } found)
-                {
-                    return TypedResults.Ok(found);
-                }
-                return TypedResults.NotFound();
-            });
-
-        tickets.MapPost("/",
-            async (CreateTicketRequest request,
-                ICommandHandler<CreateTicketCommand, Ticket> handler,
-                CancellationToken cancellationToken) =>
-            {
-                var ticket = await handler.HandleAsync(new CreateTicketCommand(request.Title), cancellationToken);
-                return TypedResults.Created($"/tickets/{ticket.Id}", ticket);
-            });
-
-        tickets.MapPut("/{id:int}",
-            Results<NoContent, NotFound> (int id, UpdateTicketRequest request, ITicketStore store) =>
-            {
-                if (store.Update(id, request.Title))
-                {
-                    return TypedResults.NoContent();
-                }
-                return TypedResults.NotFound();
-            });
-
-        tickets.MapDelete("/{id:int}",
-            Results<NoContent, NotFound> (int id, ITicketStore store) =>
-            {
-                if (store.Delete(id))
-                {
-                    return TypedResults.NoContent();
-                }
-                return TypedResults.NotFound();
-            });
-
-        tickets.MapGet("/metrics", (TicketMetrics metrics) => new { created = metrics.Created });
+        ListTicketsEndpoint.Map(tickets);
+        GetTicketEndpoint.Map(tickets);
+        GetTicketMetricsEndpoint.Map(tickets);
+        CreateTicketEndpoint.Map(tickets);
+        UpdateTicketEndpoint.Map(tickets);
+        DeleteTicketEndpoint.Map(tickets);
 
         return tickets;
     }
-
 }
