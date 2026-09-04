@@ -1,3 +1,5 @@
+namespace Helpdesk.Features.Tickets;
+
 public class InMemoryTicketStore : ITicketStore
 {
     private readonly Lock _gate = new();

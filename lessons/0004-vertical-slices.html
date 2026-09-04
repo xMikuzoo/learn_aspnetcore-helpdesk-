@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>0004 · Vertical slices — ASP.NET Core dla frontendowca</title>
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/quiz.js" defer></script>
+<script src="../assets/checklist.js" defer></script>
+</head>
+<body>
+<div class="page">
+<header class="lesson-head">
+  <div class="kicker">Lekcja 0004 · ~20 min · projekt Helpdesk</div>
+  <h1>Vertical slices: jeden folder na feature</h1>
+  <p class="subtitle">Cel: wyprowadzić wszystko, co dotyczy zgłoszeń, z <code>Program.cs</code> do folderu <code>Features/Tickets/</code> — tak, żeby <code>Program.cs</code> wrócił do dziesięciu linii, a dodanie nowego zasobu nie wymagało dotykania żadnego istniejącego pliku. Po drodze poznasz <strong>metody rozszerzające</strong>, czyli mechanizm, na którym stoi połowa API .NET-a.</p>
+  <p class="meta">Wymaga: <a href="0003-crud-typedresults.html">lekcji 0003</a> (CRUD w grupie tras). Ściąga: <a href="../reference/vertical-slices.html">Vertical slices i metody rozszerzające</a>.</p>
+</header>
+
+<h2>Problem: dwunasty endpoint</h2>
+<p>Twój <code>Program.cs</code> ma teraz około 70 linii i robi cztery niepowiązane rzeczy: rejestruje serwisy, definiuje CRUD zgłoszeń, wystawia metryki i trzyma eksperyment z lifetime'ami. Póki to jeden zasób, da się żyć. Dołóż komentarze do zgłoszeń, załączniki i użytkowników, a dostaniesz 300 linii, w których rejestracja <code>ICommentStore</code> jest 200 linii od endpointów, które z niej korzystają.</p>
+<p>W świecie frontu przerabiałeś dokładnie ten sam ruch. Kiedyś struktura Vue wyglądała tak:</p>
+<pre><code>src/
+  components/    <span class="cm">// wszystkie komponenty świata</span>
+  stores/        <span class="cm">// wszystkie store'y świata</span>
+  composables/   <span class="cm">// wszystkie composable świata</span></code></pre>
+<p>Dodanie jednego widoku znaczyło otwarcie czterech folderów i dopisanie po pliku w każdym. Dlatego przeszliście na <code>src/features/checkout/</code> z komponentem, store'em i typami obok siebie. <strong>Vertical slices to ta sama decyzja po stronie backendu</strong> — i to jest architektura, którą stosuje twój zespół.</p>
+
+<div class="callout source">
+  „Minimize coupling between slices, and maximize coupling in a slice.” — <a href="https://www.milanjovanovic.tech/blog/vertical-slice-architecture">Milan Jovanović, Vertical Slice Architecture</a>. Sedno: wewnątrz jednego feature'u pliki mogą wiedzieć o sobie wszystko; między feature'ami — jak najmniej.
+</div>
+
+<h2>Krok 1: metoda rozszerzająca</h2>
+<p>Zanim przeniesiesz pliki, potrzebujesz mechanizmu, którym feature „podłączy się" do <code>Program.cs</code>. W .NET robi się to <strong>metodą rozszerzającą</strong> (extension method).</p>
+<p>Ty już ich używasz cały czas. <code>builder.Services.AddSingleton&lt;…&gt;()</code> nie jest metodą klasy <code>ServiceCollection</code> — to metoda statyczna z zupełnie innego pliku, doklejona do interfejsu <code>IServiceCollection</code> z zewnątrz. Tak samo <code>app.MapGet</code> i <code>app.UseHttpsRedirection</code>.</p>
+<p>Składnia to jedno słowo — <code>this</code> przed pierwszym parametrem:</p>
+<pre><code><span class="kw">public static class</span> <span class="ty">TicketsFeature</span>
+{
+    <span class="kw">public static</span> <span class="ty">RouteGroupBuilder</span> MapTickets(<span class="kw">this</span> <span class="ty">IEndpointRouteBuilder</span> app)
+    {
+        <span class="cm">// …</span>
+    }
+}</code></pre>
+<p>Od tej chwili <code>app.MapTickets()</code> działa tak, jakby <code>MapTickets</code> było metodą <code>app</code>. Kompilator zamienia to na <code>TicketsFeature.MapTickets(app)</code> — to czysty cukier składniowy, żadnej magii w runtime.</p>
+<p>Frontendowo: to jest to, co w JS robiłbyś przez <code>Array.prototype.myThing = …</code>, tylko bez modyfikowania cudzego obiektu. Nic nie jest podmieniane globalnie — metoda istnieje wyłącznie w plikach, które zaimportują jej <code>namespace</code>.</p>
+
+<h3>Trzy warunki i trzy błędy kompilatora</h3>
+<p>Wszystkie trzy sprawdzone na .NET 10.0.400 — jeśli któryś zobaczysz, wiesz już, co znaczy:</p>
+<table>
+  <thead><tr><th>Zapomniałeś</th><th>Komunikat</th></tr></thead>
+  <tbody>
+    <tr><td>klasa musi być <code>static</code></td><td><code>error CS1106: Metoda rozszerzenia musi być zdefiniowana w nieogólnej klasie statycznej.</code></td></tr>
+    <tr><td><code>this</code> przy parametrze</td><td><code>error CS1061: Element „WebApplication" nie zawiera definicji „MapTickets"…</code></td></tr>
+    <tr><td><code>using</code> w <code>Program.cs</code></td><td>ten sam <code>CS1061</code>, z dopiskiem <em>„czy nie brakuje dyrektywy using…"</em></td></tr>
+  </tbody>
+</table>
+<div class="callout warn">
+  <strong>Ostatni wiersz to najczęstsza pułapka.</strong> Metoda rozszerzająca jest niewidoczna, dopóki nie masz <code>using</code> jej namespace'u. Kompilator mówi „nie ma takiej metody", choć plik leży dwa foldery obok. Dlatego w firmowym kodzie zobaczysz czasem <code>namespace Microsoft.Extensions.DependencyInjection;</code> nad własną klasą rozszerzeń — sztuczka, żeby metoda była widoczna wszędzie tam, gdzie już jest <code>AddSingleton</code>. Legalne i powszechne, ale mylące dla czytającego; my tego nie robimy.
+</div>
+
+<h2>Krok 2: <code>namespace</code>, czyli import w C#</h2>
+<p>Do tej pory wszystkie twoje pliki były w globalnym namespace i widziały się nawzajem bez żadnego <code>import</code>. To działa tylko dlatego, że projekt jest malutki. Przy folderach na feature'y potrzebujesz nazw:</p>
+<pre><code><span class="kw">namespace</span> Helpdesk.Features.Tickets;   <span class="cm">// pierwsza linia pliku, ze średnikiem</span></code></pre>
+<p>To <strong>file-scoped namespace</strong> (C# 10+): obejmuje cały plik, bez klamer i bez dodatkowego wcięcia. Starszy kod ma wersję z <code>{ … }</code> — to samo, tylko wszystko przesunięte o cztery spacje.</p>
+<p>Dwie rzeczy, które zaskakują przy przejściu z TS:</p>
+<ul>
+  <li><strong>Namespace nie wynika z folderu.</strong> Nikt go nie generuje z układu katalogów — wpisujesz go ręcznie. Konwencja mówi „ma odpowiadać ścieżce", ale kompilator tego nie sprawdza. VS Code z rozszerzeniem C# podpowie właściwy przy tworzeniu pliku.</li>
+  <li><strong>Importujesz namespace, nie plik.</strong> W TS piszesz <code>import { Ticket } from './ticket'</code> — konkretna ścieżka. W C# piszesz <code>using Helpdesk.Features.Tickets;</code> i dostajesz <em>wszystkie</em> publiczne typy z tego namespace'u, niezależnie od tego, w ilu plikach siedzą.</li>
+</ul>
+
+<h2>Krok 3: docelowa struktura</h2>
+<pre><code>project/Helpdesk/
+  Common/
+    ICurrentUser.cs          <span class="cm">// używany przez wiele feature'ów</span>
+    CommonServices.cs
+  Features/
+    Tickets/
+      Ticket.cs
+      ITicketStore.cs
+      InMemoryTicketStore.cs
+      TicketRequests.cs
+      TicketMetrics.cs
+      TicketsFeature.cs      <span class="cm">// rejestracja + endpointy</span>
+    Diagnostics/
+      Stamp.cs
+      DiagnosticsFeature.cs
+  Program.cs</code></pre>
+<p><code>TicketsFeature.cs</code> to <strong>jedyny plik, o którym wie <code>Program.cs</code></strong>. Reszta folderu jest szczegółem implementacyjnym feature'u.</p>
+<p>Zauważ, gdzie wylądował <code>ICurrentUser</code>: w <code>Common/</code>, nie w <code>Tickets/</code>. Reguła: kod idzie do <code>Common</code> dopiero wtedy, gdy używa go <strong>drugi</strong> feature. Nie „bo pewnie się przyda" — to prosta droga do folderu <code>Common</code>, w którym po roku leży połowa aplikacji.</p>
+
+<h2>Krok 4: <code>TicketsFeature.cs</code></h2>
+<p>Dwie metody rozszerzające: jedna dokłada serwisy do kontenera, druga mapuje endpointy. Obie zwracają to, co dostały — dzięki temu da się je łańcuchować, dokładnie jak wbudowane <code>Add*</code>.</p>
+<p class="filename">project/Helpdesk/Features/Tickets/TicketsFeature.cs</p>
+<pre><code><span class="kw">using</span> Helpdesk.Common;
+<span class="kw">using</span> Microsoft.AspNetCore.Http.HttpResults;
+
+<span class="kw">namespace</span> Helpdesk.Features.Tickets;
+
+<span class="kw">public static class</span> <span class="ty">TicketsFeature</span>
+{
+    <span class="kw">public static</span> <span class="ty">IServiceCollection</span> AddTickets(<span class="kw">this</span> <span class="ty">IServiceCollection</span> services)
+    {
+        services.AddSingleton&lt;<span class="ty">ITicketStore</span>, <span class="ty">InMemoryTicketStore</span>&gt;();
+        services.AddSingleton&lt;<span class="ty">TicketMetrics</span>&gt;();
+        <span class="kw">return</span> services;
+    }
+
+    <span class="kw">public static</span> <span class="ty">RouteGroupBuilder</span> MapTickets(<span class="kw">this</span> <span class="ty">IEndpointRouteBuilder</span> app)
+    {
+        <span class="kw">var</span> tickets = app.MapGroup(<span class="str">"/tickets"</span>).WithTags(<span class="str">"Tickets"</span>);
+
+        tickets.MapGet(<span class="str">"/"</span>, (<span class="ty">ITicketStore</span> store) =&gt; store.GetAll());
+
+        <span class="cm">// … reszta endpointów bez zmian, przeklejona z Program.cs</span>
+
+        tickets.MapGet(<span class="str">"/metrics"</span>, (<span class="ty">TicketMetrics</span> metrics) =&gt; <span class="kw">new</span> { created = metrics.Created });
+
+        <span class="kw">return</span> tickets;
+    }
+}</code></pre>
+
+<div class="callout">
+  <strong>Dlaczego <code>IEndpointRouteBuilder</code>, a nie <code>WebApplication</code>?</strong> Bo <code>MapGroup</code> zwraca <code>RouteGroupBuilder</code>, który też implementuje <code>IEndpointRouteBuilder</code>. Pisząc na interfejsie, tę samą metodę wywołasz zarówno na <code>app</code>, jak i wewnątrz innej grupy — np. <code>var api = app.MapGroup("/api"); api.MapTickets();</code> przeniesie cały feature pod <code>/api/tickets</code> jedną linią. Gdybyś zadeklarował <code>this WebApplication app</code>, ta możliwość by nie istniała.
+</div>
+
+<h3><code>/tickets/metrics</code> obok <code>/tickets/{id:int}</code></h3>
+<p>Metryki przeniosły się z <code>/metrics</code> pod <code>/tickets/metrics</code> — bo dotyczą zgłoszeń, więc należą do slice'u. Można by się bać kolizji z <code>/tickets/{id:int}</code>, ale zweryfikowane: <code>GET /tickets/metrics</code> zwraca <code>{"created":1}</code>, nie 404. Ograniczenie <code>:int</code> z lekcji 0003 wyklucza <code>"metrics"</code> z dopasowania, więc routing spokojnie idzie do trasy dosłownej. <strong>Bez <code>:int</code> ten adres by nie działał.</strong></p>
+
+<h2>Krok 5: <code>Program.cs</code> po refactorze</h2>
+<p class="filename">project/Helpdesk/Program.cs</p>
+<pre><code><span class="kw">using</span> Helpdesk.Common;
+<span class="kw">using</span> Helpdesk.Features.Diagnostics;
+<span class="kw">using</span> Helpdesk.Features.Tickets;
+
+<span class="kw">var</span> builder = <span class="ty">WebApplication</span>.CreateBuilder(args);
+
+builder.Services.AddCurrentUser();
+builder.Services.AddTickets();
+builder.Services.AddDiagnostics();
+
+<span class="kw">var</span> app = builder.Build();
+
+app.MapGet(<span class="str">"/"</span>, () =&gt; <span class="str">"Hello World!"</span>);
+
+app.MapTickets();
+app.MapDiagnostics();
+
+app.Run();</code></pre>
+<p>Trzynaście linii i czytelny spis treści aplikacji. Ale ważniejsza jest inna właściwość: <strong>dodanie feature'u „komentarze" to jeden nowy folder i dwie nowe linie tutaj.</strong> Zero zmian w istniejących plikach. To jest cała obietnica vertical slices — nowy kod dopisujesz, starego nie ruszasz, więc nie ma czego zepsuć.</p>
+
+<div class="callout analogy">
+  Uwaga na kolejność: <code>Add*</code> muszą być <strong>przed</strong> <code>builder.Build()</code>, <code>Map*</code> <strong>po</strong>. Kontener jest zamykany w momencie <code>Build()</code> — to ta sama granica, o którą rozbiła się captive dependency w lekcji 0002.
+</div>
+
+<h2>Czym to <em>nie</em> jest</h2>
+<p>Warto od razu odróżnić dwie rzeczy, które w rozmowie w pracy padają obok siebie:</p>
+<table>
+  <thead><tr><th></th><th>Vertical slices</th><th>Clean Architecture</th></tr></thead>
+  <tbody>
+    <tr><td>Kryterium podziału</td><td>feature (Tickets, Comments)</td><td>warstwa (Domain, Application, Infrastructure)</td></tr>
+    <tr><td>Nowy feature</td><td>jeden folder</td><td>plik w każdej warstwie</td></tr>
+    <tr><td>Reguła zależności</td><td>slice nie zna slice'u</td><td>wszystko wskazuje do środka</td></tr>
+    <tr><td>Cena</td><td>duplikacja między slice'ami</td><td>abstrakcje i przeskakiwanie między projektami</td></tr>
+  </tbody>
+</table>
+<p>Nie są sprzeczne — da się mieć slices wewnątrz warstwy Application. Do Clean Architecture wracamy w lekcji 0009; na razie zapamiętaj samo kryterium podziału, bo to ono pada w pytaniu „czemu u nas jest tyle folderów".</p>
+
+<div class="task">
+  <h3>Zadanie</h3>
+  <ol>
+    <li>Utwórz <code>Common/</code> i <code>Features/Tickets/</code>. Przenieś tam pliki wg struktury z kroku 3 i dopisz <code>namespace</code> w pierwszej linii każdego. <code>TicketMetrics.cs</code> będzie dodatkowo potrzebował <code>using Helpdesk.Common;</code> — używa <code>ICurrentUser</code>.</li>
+    <li>Napisz <code>TicketsFeature.cs</code> z <code>AddTickets</code> i <code>MapTickets</code>. Przenieś do niego wszystkie endpointy <code>/tickets</code> oraz metryki jako <code>/tickets/metrics</code>.</li>
+    <li>Napisz <code>Common/CommonServices.cs</code> z <code>AddCurrentUser()</code> — ma zawierać <code>AddHttpContextAccessor()</code> i rejestrację <code>ICurrentUser</code>.</li>
+    <li>Wytnij z <code>Program.cs</code> wszystko, co przeniosłeś. Zbuduj — jeśli dostaniesz <code>CS1061</code>, wróć do tabeli z kroku 1, zanim zaczniesz zgadywać.</li>
+    <li><strong>Sam, bez wzoru:</strong> zrób to samo dla lifetime'ów — <code>Features/Diagnostics/</code> ze <code>Stamp.cs</code> i <code>DiagnosticsFeature.cs</code> (<code>AddDiagnostics</code> + <code>MapDiagnostics</code>, endpoint pod <code>/diagnostics/lifetimes</code>). Marker <code>TODO(human)</code> czeka w <code>Program.cs</code>.</li>
+    <li>Sprawdź, że wszystko dalej działa — te same wywołania co w lekcji 0003, plus <code>GET /tickets/metrics</code> i <code>GET /diagnostics/lifetimes</code>.</li>
+  </ol>
+  <div class="check">
+    <label><input type="checkbox" id="c1"> <code>Program.cs</code> ma poniżej 15 linii i żadnej definicji endpointu <code>/tickets</code></label>
+    <label><input type="checkbox" id="c2"> Wszystkie pliki zgłoszeń są w <code>Features/Tickets/</code> i mają <code>namespace</code></label>
+    <label><input type="checkbox" id="c3"> <code>AddTickets</code> i <code>MapTickets</code> zwracają swój argument</label>
+    <label><input type="checkbox" id="c4"> <code>GET /tickets/metrics</code> zwraca licznik, nie 404</label>
+    <label><input type="checkbox" id="c5"> <code>DiagnosticsFeature</code> napisany samodzielnie i <code>/diagnostics/lifetimes</code> działa</label>
+    <label><input type="checkbox" id="c6"> Umiem powiedzieć, co znaczy <code>CS1106</code> i <code>CS1061</code></label>
+  </div>
+</div>
+
+<h2>Sprawdź się</h2>
+<p>Odpowiedz zanim klikniesz. Zła odpowiedź nie zdradza dobrej — spróbuj jeszcze raz.</p>
+
+<div class="quiz" id="q1" data-answer="1">
+  <div class="q">Co czyni metodę statyczną metodą rozszerzającą?</div>
+  <button class="opt">Nazwa zaczynająca się od Map</button>
+  <button class="opt">Słowo <code>this</code> przy pierwszym parametrze</button>
+  <button class="opt">Umieszczenie jej w folderze Features</button>
+  <div class="why"><code>this</code> przed typem pierwszego parametru mówi kompilatorowi, że wywołanie <code>app.MapTickets()</code> ma się przełożyć na <code>TicketsFeature.MapTickets(app)</code>. Dodatkowo klasa musi być <code>static</code> i nieogólna — inaczej <code>CS1106</code>.</div>
+</div>
+
+<div class="quiz" id="q2" data-answer="2">
+  <div class="q">Kompilator: „<code>WebApplication</code> nie zawiera definicji <code>MapTickets</code>”. Co sprawdzasz najpierw?</div>
+  <button class="opt">Czy serwis jest zarejestrowany w DI</button>
+  <button class="opt">Czy endpoint ma poprawny szablon trasy</button>
+  <button class="opt">Czy jest <code>using</code> tego namespace'u</button>
+  <div class="why">Metoda rozszerzająca jest niewidoczna bez <code>using</code> jej namespace'u — kompilator zgłasza to jako brak metody, nie jako brak importu. Drugi kandydat to zgubione <code>this</code>. Rejestracja w DI nie ma tu nic do rzeczy: to błąd kompilacji, a DI rozstrzyga się w runtime.</div>
+</div>
+
+<div class="quiz" id="q3" data-answer="0">
+  <div class="q">Po co <code>MapTickets</code> przyjmuje <code>IEndpointRouteBuilder</code> zamiast <code>WebApplication</code>?</div>
+  <button class="opt">Bo działa też wewnątrz innej grupy</button>
+  <button class="opt">Bo <code>WebApplication</code> jest zapieczętowana</button>
+  <button class="opt">Bo tylko tak widzi kontener DI</button>
+  <div class="why"><code>RouteGroupBuilder</code> również implementuje <code>IEndpointRouteBuilder</code>, więc ten sam feature podłączysz pod <code>app</code> albo pod <code>app.MapGroup("/api")</code>. Programowanie na interfejsie kupuje ci tu konkretną elastyczność, nie samą czystość.</div>
+</div>
+
+<div class="quiz" id="q4" data-answer="1">
+  <div class="q">Kiedy klasa powinna trafić do folderu <code>Common</code>?</div>
+  <button class="opt">Gdy nie zawiera logiki biznesowej</button>
+  <button class="opt">Gdy używa jej drugi feature</button>
+  <button class="opt">Gdy jest interfejsem z implementacją</button>
+  <div class="why">Kryterium to faktyczne użycie, nie przewidywanie. Przenoszenie tam kodu „bo się przyda” kończy się folderem, w którym leży połowa aplikacji i który zależy od wszystkiego — czyli dokładnie tym, przed czym slices mają chronić.</div>
+</div>
+
+<details class="recall">
+  <summary>Na co kompilator zamienia <code>app.MapTickets()</code>?</summary>
+  <p>Na zwykłe wywołanie statyczne <code>TicketsFeature.MapTickets(app)</code>. Metody rozszerzające to cukier składniowy rozwijany w czasie kompilacji — w runtime nie istnieje żadne „doklejanie” metod do typu.</p>
+</details>
+
+<details class="recall">
+  <summary>Czym różni się <code>using</code> w C# od <code>import</code> w TypeScript?</summary>
+  <p><code>import</code> wskazuje plik i wybrane symbole. <code>using</code> wskazuje <em>namespace</em> i wciąga wszystkie jego publiczne typy, niezależnie od liczby plików. Namespace nie jest wyprowadzany z układu folderów — wpisujesz go ręcznie.</p>
+</details>
+
+<details class="recall">
+  <summary>Jaka jest jednozdaniowa różnica między vertical slices a Clean Architecture?</summary>
+  <p>Kryterium podziału: slices tną kod po feature'ach, Clean Architecture po warstwach. Stąd „nowy feature = jeden folder” kontra „nowy feature = plik w każdej warstwie”.</p>
+</details>
+
+<h2>Źródło pierwotne</h2>
+<div class="callout source">
+  <a href="https://www.milanjovanovic.tech/blog/vertical-slice-architecture">Milan Jovanović — Vertical Slice Architecture</a> (ok. 8 min). Czytaj po to, żeby zapamiętać jedno zdanie: <em>„Minimize coupling between slices, and maximize coupling in a slice”</em> — to autor, którego zna twój zespół, więc to jest dosłownie ich słownik. Do samych metod rozszerzających: <a href="https://learn.microsoft.com/en-us/dotnet/csharp/programming-guide/classes-and-structs/extension-methods">Extension Methods (C# Programming Guide)</a> — sekcje <em>Definition</em> i <em>Binding at compile time</em>.
+</div>
+
+<div class="callout ask">Coś nie wchodzi — <code>CS1061</code> mimo <code>using</code>, konflikt tras, plik nie widzi typu z sąsiedniego folderu? Wklej to nauczycielowi w terminalu (Claude Code w <code>C:\PLAYGROUND\asp</code>). Pytanie do zespołu: <em>„czy slice'y u nas mogą się nawzajem wołać, czy tylko przez coś wspólnego?”</em> — odpowiedź powie ci, jak rygorystycznie traktują izolację feature'ów.</div>
+
+<h2>Co dalej</h2>
+<p>Masz folder na feature, ale w środku wszystko dalej siedzi w jednej metodzie <code>MapTickets</code>: lambda pobiera dane, woła store i buduje odpowiedź. Póki to jest <code>store.Add(title)</code>, jest dobrze. Ale „utwórz zgłoszenie” zaraz zacznie znaczyć: zwaliduj, sprawdź uprawnienia, zapisz, zwiększ metrykę, wyślij powiadomienie. Tego nie chcesz mieć w lambdzie endpointu. Lekcja 0005: <strong>command vs query</strong> — rozdzielenie „zmień stan” od „przeczytaj stan” i pierwszy własny <code>ICommandHandler</code>. To jest ten fragment, który w twoim firmowym repo nazywa się CQRS.</p>
+
+<nav class="lesson-nav">
+  <a href="0003-crud-typedresults.html">← Lekcja 0003</a>
+  <a href="../reference/vertical-slices.html">Ściąga: Vertical slices</a>
+  <a href="../reference/glossary.html">Glossary</a>
+</nav>
+</div>
+</body>
+</html>

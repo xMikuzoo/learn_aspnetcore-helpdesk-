@@ -1,4 +1,7 @@
 /// <summary>Kto wykonuje bieżące żądanie.</summary>
+
+namespace Helpdesk.Common;
+
 public interface ICurrentUser
 {
     string Name { get; }

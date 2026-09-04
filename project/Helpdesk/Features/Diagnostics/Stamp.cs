@@ -1,3 +1,5 @@
+namespace Helpdesk.Features.Diagnostics;
+
 public interface IStamp { string Id { get; } }
 public interface ITransientStamp : IStamp;
 public interface IScopedStamp : IStamp;

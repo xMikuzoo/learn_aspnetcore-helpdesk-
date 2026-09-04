@@ -1,3 +1,7 @@
+using Helpdesk.Common;
+
+namespace Helpdesk.Features.Tickets;
+
 /// <summary>Licznik zgłoszeń utworzonych od startu aplikacji</summary>
 public class TicketMetrics
 {

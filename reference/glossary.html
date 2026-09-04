@@ -155,6 +155,21 @@
   <dd>Wygenerowany kod opisujący zmianę schematu bazy. <code>dotnet ef migrations add Nazwa</code>, potem <code>dotnet ef database update</code>.</dd>
 </dl>
 
+<h2>Struktura projektu</h2>
+<dl>
+  <dt>Vertical slice <span class="pl">— pionowy wycinek</span></dt>
+  <dd>Podział kodu po feature'ach, nie po warstwach: wszystko, co dotyczy zgłoszeń, leży w <code>Features/Tickets/</code>. Nowy feature = nowy folder, zero zmian w istniejących plikach. Patrz <a href="vertical-slices.html">ściąga</a>.</dd>
+
+  <dt>Extension method <span class="pl">— metoda rozszerzająca</span></dt>
+  <dd>Metoda statyczna z <code>this</code> przy pierwszym parametrze, wywoływana tak, jakby należała do rozszerzanego typu. <code>AddSingleton</code> i <code>MapGet</code> to właśnie one. Wymaga <code>using</code> namespace'u — inaczej <code>CS1061</code>.</dd>
+
+  <dt>Namespace <span class="pl">— przestrzeń nazw</span></dt>
+  <dd>Nazwa grupująca typy, wpisywana ręcznie w pierwszej linii pliku (<code>namespace Helpdesk.Features.Tickets;</code>). Nie wynika z folderu — konwencja, nie reguła kompilatora. <code>using</code> importuje cały namespace, nie plik.</dd>
+
+  <dt>Clean Architecture <span class="pl">— architektura warstwowa</span></dt>
+  <dd>Podział po warstwach (Domain / Application / Infrastructure) z regułą „zależności wskazują do środka”. Alternatywne kryterium podziału wobec vertical slices; oba dają się łączyć. Rozwinięcie w lekcji 0009.</dd>
+</dl>
+
 <h2>Składnia C# dla ludzi od TS</h2>
 <table>
   <thead><tr><th>C#</th><th>TS/JS odpowiednik</th><th>Uwagi</th></tr></thead>

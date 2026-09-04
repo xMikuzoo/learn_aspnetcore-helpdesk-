@@ -1,3 +1,5 @@
+namespace Helpdesk.Features.Tickets;
+
 public interface ITicketStore
 {
     IReadOnlyList<Ticket> GetAll();

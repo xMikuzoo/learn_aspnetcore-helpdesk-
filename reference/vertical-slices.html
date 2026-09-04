@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vertical slices i metody rozszerzające — ściąga</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<div class="page">
+<header class="lesson-head">
+  <div class="kicker">Reference · Struktura projektu</div>
+  <h1>Vertical slices i metody rozszerzające</h1>
+  <p class="subtitle">Ściąga do druku. Oparta na <a href="https://www.milanjovanovic.tech/blog/vertical-slice-architecture">Vertical Slice Architecture</a> i <a href="https://learn.microsoft.com/en-us/dotnet/csharp/programming-guide/classes-and-structs/extension-methods">Extension Methods (C# Programming Guide)</a>; struktura i komunikaty błędów zweryfikowane na .NET 10.0.400.</p>
+  <p class="meta">Ćwiczone w <a href="../lessons/0004-vertical-slices.html">lekcji 0004</a>.</p>
+</header>
+
+<h2>Metoda rozszerzająca — trzy warunki</h2>
+<pre><code><span class="kw">public static class</span> <span class="ty">TicketsFeature</span>          <span class="cm">// 1. klasa static, nieogólna</span>
+{
+    <span class="kw">public static</span> <span class="ty">RouteGroupBuilder</span> MapTickets(  <span class="cm">// 2. metoda static</span>
+        <span class="kw">this</span> <span class="ty">IEndpointRouteBuilder</span> app)            <span class="cm">// 3. this przy 1. parametrze</span>
+    { … }
+}</code></pre>
+<p>W miejscu użycia potrzebny jest jeszcze <code>using</code> namespace'u, w którym leży klasa. <code>app.MapTickets()</code> kompiluje się do <code>TicketsFeature.MapTickets(app)</code> — cukier składniowy, rozwijany w czasie kompilacji.</p>
+
+<h3>Diagnostyka</h3>
+<table>
+  <thead><tr><th>Komunikat</th><th>Przyczyna</th></tr></thead>
+  <tbody>
+    <tr><td><code>CS1106</code> — „Metoda rozszerzenia musi być zdefiniowana w nieogólnej klasie statycznej”</td><td>klasa bez <code>static</code> (albo generyczna)</td></tr>
+    <tr><td><code>CS1061</code> — „X nie zawiera definicji Y… czy nie brakuje dyrektywy using”</td><td>brak <code>using</code> namespace'u <strong>albo</strong> zgubione <code>this</code></td></tr>
+    <tr><td><code>CS0246</code> — „Nie można znaleźć nazwy typu”</td><td>typ z innego namespace'u bez <code>using</code></td></tr>
+  </tbody>
+</table>
+
+<h2>Wzorzec pary <code>Add*</code> / <code>Map*</code></h2>
+<pre><code><span class="kw">public static</span> <span class="ty">IServiceCollection</span> AddTickets(<span class="kw">this</span> <span class="ty">IServiceCollection</span> services)
+{
+    services.AddSingleton&lt;<span class="ty">ITicketStore</span>, <span class="ty">InMemoryTicketStore</span>&gt;();
+    <span class="kw">return</span> services;                     <span class="cm">// zwróć argument → łańcuchowanie</span>
+}
+
+<span class="kw">public static</span> <span class="ty">RouteGroupBuilder</span> MapTickets(<span class="kw">this</span> <span class="ty">IEndpointRouteBuilder</span> app)
+{
+    <span class="kw">var</span> tickets = app.MapGroup(<span class="str">"/tickets"</span>).WithTags(<span class="str">"Tickets"</span>);
+    …
+    <span class="kw">return</span> tickets;
+}</code></pre>
+<ul>
+  <li><code>Add*</code> woła się <strong>przed</strong> <code>builder.Build()</code>, <code>Map*</code> <strong>po</strong>. Kontener zamyka się w <code>Build()</code>.</li>
+  <li>Bierz <code>IEndpointRouteBuilder</code>, nie <code>WebApplication</code> — wtedy feature podłączysz też pod grupę: <code>app.MapGroup("/api").MapTickets()</code>.</li>
+  <li>Zwracanie argumentu nie jest wymagane, ale daje ten sam styl co wbudowane <code>Add*</code>.</li>
+</ul>
+
+<h2>Namespace</h2>
+<pre><code><span class="kw">namespace</span> Helpdesk.Features.Tickets;   <span class="cm">// file-scoped, C# 10+, pierwsza linia</span></code></pre>
+<table>
+  <thead><tr><th>TypeScript</th><th>C#</th></tr></thead>
+  <tbody>
+    <tr><td><code>import { Ticket } from './ticket'</code></td><td><code>using Helpdesk.Features.Tickets;</code></td></tr>
+    <tr><td>wskazujesz plik i symbole</td><td>wskazujesz namespace, dostajesz wszystkie publiczne typy</td></tr>
+    <tr><td>ścieżka wymuszona przez bundler</td><td>namespace wpisywany ręcznie, folder to tylko konwencja</td></tr>
+    <tr><td>brak importu = błąd w tym pliku</td><td>brak <code>using</code> = <code>CS0246</code> lub <code>CS1061</code></td></tr>
+  </tbody>
+</table>
+
+<h2>Struktura</h2>
+<pre><code>Helpdesk/
+  Common/            <span class="cm">// tylko to, czego używa &gt;1 feature</span>
+  Features/
+    Tickets/
+      Ticket.cs  ITicketStore.cs  InMemoryTicketStore.cs
+      TicketRequests.cs  TicketMetrics.cs
+      TicketsFeature.cs        <span class="cm">// jedyny plik znany Program.cs</span>
+    Diagnostics/
+  Program.cs</code></pre>
+<div class="callout">
+  <strong>Reguła <code>Common</code>:</strong> kod trafia tam dopiero, gdy sięgnie po niego <em>drugi</em> feature. Przenoszenie „na zapas” robi z <code>Common</code> worek zależny od wszystkiego.
+</div>
+
+<h2>Slices vs Clean Architecture</h2>
+<table>
+  <thead><tr><th></th><th>Vertical slices</th><th>Clean Architecture</th></tr></thead>
+  <tbody>
+    <tr><td>Podział</td><td>po feature</td><td>po warstwie</td></tr>
+    <tr><td>Nowy feature</td><td>jeden folder, zero zmian w istniejących</td><td>plik w każdej warstwie</td></tr>
+    <tr><td>Zależności</td><td>slice nie zna slice'u</td><td>wszystko wskazuje do środka</td></tr>
+    <tr><td>Cena</td><td>duplikacja między slice'ami</td><td>abstrakcje, skakanie po projektach</td></tr>
+  </tbody>
+</table>
+<p>Nie są alternatywami — slices bywają wewnątrz warstwy Application. Hasło do zapamiętania: <em>„Minimize coupling between slices, and maximize coupling in a slice.”</em></p>
+
+<nav class="lesson-nav">
+  <a href="glossary.html">← Glossary</a>
+  <a href="minimal-api-crud.html">Ściąga: Minimal API</a>
+  <a href="../lessons/0004-vertical-slices.html">Lekcja 0004 →</a>
+</nav>
+</div>
+</body>
+</html>
