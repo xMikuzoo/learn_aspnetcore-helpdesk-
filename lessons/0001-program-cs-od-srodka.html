@@ -58,7 +58,7 @@ app.Run();</code></pre>
 <div class="task">
   <h3>Zbuduj Helpdesk i dodaj pierwszy endpoint</h3>
   <ol>
-    <li>W terminalu, w <code>C:\REPOS\asp</code>:
+    <li>W terminalu, w <code>C:\PLAYGROUND\asp</code>:
 <pre><code>dotnet new web -n Helpdesk -o project/Helpdesk
 cd project/Helpdesk
 dotnet run</code></pre>
@@ -120,7 +120,7 @@ dotnet run</code></pre>
   <a href="https://learn.microsoft.com/en-us/aspnet/core/tutorials/min-web-api?view=aspnetcore-10.0">Microsoft Learn — Tutorial: Create a Minimal API with ASP.NET Core</a>. Przeczytaj do sekcji <em>Examine the project files</em> włącznie (ok. 10 min); resztę (EF Core, Todo) pomiń — dojdziemy tam sami w lekcji 0008. Dokumentacja zespołu ASP.NET; wszystko w tej lekcji z niej wynika. Uwaga: tutorial używa <code>dotnet new webapi</code> (to też minimal API, tylko z OpenAPI i przykładem), my <code>dotnet new web</code>. Dowód, że cztery linijki są autentyczne: <a href="https://raw.githubusercontent.com/dotnet/aspnetcore/release/10.0/src/ProjectTemplates/Web.ProjectTemplates/content/EmptyWeb-CSharp/Program.cs">źródło szablonu w repo dotnet/aspnetcore</a>. Stanowisko Microsoftu „minimal API dla nowych projektów”: <a href="https://learn.microsoft.com/en-us/aspnet/core/fundamentals/apis?view=aspnetcore-10.0">APIs overview</a>.
 </div>
 
-<div class="callout ask">Coś niejasne — błąd kompilatora, dziwny port, JSON nie taki jak w quizie? Wklej to nauczycielowi w terminalu (Claude Code w <code>C:\REPOS\asp</code>). Pytaj też „dlaczego”, nie tylko „jak” — to jest ważniejsze przy DI.</div>
+<div class="callout ask">Coś niejasne — błąd kompilatora, dziwny port, JSON nie taki jak w quizie? Wklej to nauczycielowi w terminalu (Claude Code w <code>C:\PLAYGROUND\asp</code>). Pytaj też „dlaczego”, nie tylko „jak” — to jest ważniejsze przy DI.</div>
 
 <h2>Co dalej</h2>
 <p>Lekcja 0002: pierwszy serwis przez DI. Wyciągniemy listę zgłoszeń z lambdy do klasy <code>InMemoryTicketStore</code>, zarejestrujemy ją w <code>builder.Services</code> i zobaczymy na własne oczy różnicę między Singleton, Scoped i Transient.</p>

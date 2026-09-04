@@ -29,3 +29,5 @@
 
 ## Log sesji
 - 2026-09-04: workspace założony. Research gotowy (research/aspnet-learning-path.md, 60 źródeł). RESOURCES.md, glossary, assets, lekcja 0001 napisane i zweryfikowane na SDK 10.0.400. Lekcja 0001 otwarta w przeglądarce; czekam na wynik.
+- 2026-09-04: lekcja 0001 zaliczona i zweryfikowana curl-em (LR-0001). Poprawiona ścieżka workspace w lekcji 0001 (było `C:\REPOS\asp`). Dodany `.vscode/settings.json` (formatOnSave + codeActionsOnSave) — bez tego `.editorconfig` nie odpalał się przy zapisie. Uwaga na przyszłość: Roslyn formatter NIE poprawia wcięć w `new[] { … }` (sprawdzone empirycznie) — nie obiecywać w lekcjach, że format-on-save wyrówna array initializer.
+- Do lekcji 0003: `TypedResults.Ok/NotFound`, `FirstOrDefault` vs `Where`, 404 dla nieistniejącego zasobu.

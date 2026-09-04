@@ -1,0 +1,24 @@
+{
+  // --- Formatowanie przy zapisie ---
+  "editor.formatOnSave": true,
+  "editor.formatOnPaste": true,
+  // --- C# (Roslyn / C# Dev Kit) ---
+  "[csharp]": {
+    "editor.defaultFormatter": "ms-dotnettools.csharp",
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.fixAll": "explicit",
+      "source.organizeImports": "explicit"
+    }
+  },
+  "dotnet.formatting.organizeImportsOnFormat": true,
+  // --- Whitespace wg .editorconfig (backup dla nie-C# plikow) ---
+  "files.trimTrailingWhitespace": true,
+  "files.insertFinalNewline": true,
+  "files.trimFinalNewlines": true,
+  "files.encoding": "utf8",
+  // --- Markdown wyjatek (editorconfig: trim_trailing_whitespace = false) ---
+  "[markdown]": {
+    "files.trimTrailingWhitespace": false
+  }
+}
