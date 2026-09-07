@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Błędy / ProblemDetails — ściąga</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<div class="page">
+<header class="lesson-head">
+  <div class="kicker">Reference · Obsługa błędów</div>
+  <h1>Błędy domenowe i <code>ProblemDetails</code></h1>
+  <p class="subtitle">Ściąga do druku. Format wg <a href="https://www.rfc-editor.org/rfc/rfc9457">RFC 9457</a>, API wg <a href="https://learn.microsoft.com/aspnet/core/fundamentals/error-handling-api?view=aspnetcore-10.0">Handle errors in ASP.NET Core APIs</a>; kod i komunikaty zweryfikowane na .NET 10.0.400.</p>
+  <p class="meta">Ćwiczone w <a href="../lessons/0007-bledy-problemdetails.html">lekcji 0007</a>.</p>
+</header>
+
+<h2>Kształt odpowiedzi</h2>
+<pre><code>HTTP/1.1 404 Not Found
+Content-Type: application/problem+json
+
+{
+  <span class="str">"type"</span>: <span class="str">"https://tools.ietf.org/html/rfc9110#section-15.5.5"</span>,
+  <span class="str">"title"</span>: <span class="str">"Nie znaleziono"</span>,
+  <span class="str">"status"</span>: 404,
+  <span class="str">"detail"</span>: <span class="str">"Zgłoszenie 99 nie istnieje."</span>,
+  <span class="str">"code"</span>: <span class="str">"ticket.not_found"</span>,
+  <span class="str">"traceId"</span>: <span class="str">"00-2f9129be...-00"</span>
+}</code></pre>
+<table>
+  <thead><tr><th>Pole</th><th>Dla kogo</th><th>Stabilne?</th></tr></thead>
+  <tbody>
+    <tr><td><code>type</code></td><td>maszyna</td><td>tak — URI klasy problemu</td></tr>
+    <tr><td><code>title</code></td><td>człowiek</td><td>tak dla danego typu</td></tr>
+    <tr><td><code>status</code></td><td>oba</td><td>tak</td></tr>
+    <tr><td><code>detail</code></td><td>człowiek</td><td><strong>nie</strong> — nie buduj na tym logiki</td></tr>
+    <tr><td><code>code</code> (rozszerzenie)</td><td>maszyna</td><td><strong>tak</strong> — kontrakt z frontendem</td></tr>
+    <tr><td><code>traceId</code></td><td>support</td><td>per żądanie; łączy z logiem</td></tr>
+  </tbody>
+</table>
+
+<h2>Po co frontendowi <code>code</code></h2>
+<table>
+  <thead><tr><th>Zastosowanie</th><th>Przykład</th></tr></thead>
+  <tbody>
+    <tr><td>tłumaczenie</td><td><code>t(`errors.${code}`)</code> — i18n zostaje na froncie</td></tr>
+    <tr><td>pole formularza</td><td><code>ticket.empty_title</code> → ramka pod polem, nie globalny toast</td></tr>
+    <tr><td>rozróżnienie w obrębie statusu</td><td>dwa różne 409 → dwie różne akcje UI</td></tr>
+    <tr><td>interceptor HTTP</td><td>retry / wyloguj / pokaż — jeden <code>switch</code></td></tr>
+    <tr><td>telemetria</td><td>grupowanie w Sentry (<code>detail</code> ma id → tysiąc grup)</td></tr>
+  </tbody>
+</table>
+<p>Zysk jest przy 400 (które pole?) i 409 (który konflikt?). Przy 404/500 to głównie wygoda dla telemetrii. Gdy front robi tylko <code>toast.error(detail)</code> — <code>code</code> jest ceremonią.</p>
+
+<h2>Trzy kawałki</h2>
+<pre><code><span class="kw">public enum</span> <span class="ty">ErrorType</span> { Validation, NotFound, Conflict, Forbidden }
+
+<span class="kw">public record</span> <span class="ty">Error</span>(<span class="kw">string</span> Code, <span class="kw">string</span> Message, <span class="ty">ErrorType</span> Type);
+
+<span class="kw">public class</span> <span class="ty">DomainException</span>(<span class="ty">Error</span> error) : <span class="ty">Exception</span>(error.Message)
+{
+    <span class="kw">public</span> <span class="ty">Error</span> Error { <span class="kw">get</span>; } = error;
+}
+
+<span class="kw">public static class</span> <span class="ty">TicketErrors</span>
+{
+    <span class="kw">public static</span> <span class="ty">Error</span> NotFound(<span class="kw">int</span> id) =&gt;
+        <span class="kw">new</span>(<span class="str">"ticket.not_found"</span>, $<span class="str">"Zgłoszenie {id} nie istnieje."</span>, <span class="ty">ErrorType</span>.NotFound);
+}</code></pre>
+<p>Katalog błędów mieszka w feature, nie w <code>Common/</code>. Metoda, gdy komunikat ma parametr; <code>static readonly</code> pole, gdy jest stały.</p>
+
+<h2>Handler</h2>
+<pre><code><span class="kw">public class</span> <span class="ty">DomainExceptionHandler</span>(<span class="ty">IProblemDetailsService</span> problemDetailsService) : <span class="ty">IExceptionHandler</span>
+{
+    <span class="kw">public async</span> <span class="ty">ValueTask</span>&lt;<span class="kw">bool</span>&gt; TryHandleAsync(<span class="ty">HttpContext</span> ctx, <span class="ty">Exception</span> ex, <span class="ty">CancellationToken</span> ct)
+    {
+        <span class="kw">if</span> (ex <span class="kw">is not</span> <span class="ty">DomainException</span> domain) <span class="kw">return false</span>;
+
+        ctx.Response.StatusCode = StatusFor(domain.Error.Type);
+
+        <span class="kw">return await</span> problemDetailsService.TryWriteAsync(<span class="kw">new</span> <span class="ty">ProblemDetailsContext</span>
+        {
+            HttpContext = ctx,
+            Exception = ex,
+            ProblemDetails =
+            {
+                Title = TitleFor(domain.Error.Type),
+                Detail = domain.Error.Message,
+                Status = ctx.Response.StatusCode,
+                Extensions = { [<span class="str">"code"</span>] = domain.Error.Code }
+            }
+        });
+    }
+}</code></pre>
+<table>
+  <thead><tr><th>Zwrot</th><th>Znaczenie</th></tr></thead>
+  <tbody>
+    <tr><td><code>false</code></td><td>„nie mój wyjątek" — leci do następnego handlera, na końcu do fallbacku</td></tr>
+    <tr><td><code>true</code></td><td>„obsłużone" — <strong>musisz</strong> napisać całą odpowiedź ze statusem, inaczej klient dostanie puste 404</td></tr>
+  </tbody>
+</table>
+
+<h2>Rejestracja</h2>
+<pre><code>builder.Services.AddProblemDetails();
+builder.Services.AddExceptionHandler&lt;<span class="ty">DomainExceptionHandler</span>&gt;();   <span class="cm">// Singleton!</span>
+
+<span class="kw">var</span> app = builder.Build();
+
+app.UseExceptionHandler();   <span class="cm">// middleware — przed MapXxx()</span></code></pre>
+<p>Handlery uruchamiają się w kolejności rejestracji. <code>UseExceptionHandler()</code> bez argumentu wymaga fallbacku: albo <code>AddProblemDetails()</code>, albo ścieżki (<code>UseExceptionHandler("/error")</code>), albo lambdy.</p>
+
+<h2>Kaskada w kodzie</h2>
+<table>
+  <thead><tr><th>Warstwa</th><th>Przed</th><th>Po</th></tr></thead>
+  <tbody>
+    <tr><td>handler</td><td><code>Task&lt;bool&gt;</code>, zwraca <code>false</code></td><td><code>Task&lt;Unit&gt;</code>, <code>throw new DomainException(...)</code></td></tr>
+    <tr><td>query</td><td><code>IQuery&lt;TicketDto?&gt;</code></td><td><code>IQuery&lt;TicketDto&gt;</code> + <code>?? throw</code></td></tr>
+    <tr><td>endpoint</td><td><code>Results&lt;NoContent, NotFound&gt;</code> + <code>if</code></td><td><code>NoContent</code>, bez rozgałęzień</td></tr>
+    <tr><td>OpenAPI</td><td>404 wynika z typu</td><td>trzeba dopisać <code>.Produces&lt;ProblemDetails&gt;(404)</code></td></tr>
+  </tbody>
+</table>
+<pre><code><span class="kw">public readonly record struct</span> <span class="ty">Unit</span> { <span class="kw">public static readonly</span> <span class="ty">Unit</span> Value = <span class="kw">new</span>(); }</code></pre>
+<p><code>void</code> nie jest typem — nie da się napisać <code>ICommand&lt;void&gt;</code>. MediatR ma dokładnie ten sam <code>Unit</code>.</p>
+
+<h2>Diagnostyka</h2>
+<table>
+  <thead><tr><th>Objaw</th><th>Kiedy</th><th>Przyczyna</th></tr></thead>
+  <tbody>
+    <tr><td><code>Unable to resolve service for type 'IProblemDetailsService'</code></td><td>start</td><td><code>AddExceptionHandler</code> bez <code>AddProblemDetails</code></td></tr>
+    <tr><td><code>Either the 'ExceptionHandlingPath' or the 'ExceptionHandler' property must be set</code></td><td>start</td><td><code>UseExceptionHandler()</code> bez fallbacku</td></tr>
+    <tr><td>500 zamiast 404, w ciele stack trace</td><td>żądanie</td><td>brak <code>app.UseExceptionHandler()</code> w pipelinie</td></tr>
+    <tr><td>puste 404 + <code>produced a 404 status response</code> w logu</td><td>żądanie</td><td>handler zwrócił <code>true</code>, nic nie pisząc</td></tr>
+    <tr><td>błąd wraca bez problem+json</td><td>żądanie</td><td><code>Accept</code> spoza json / problem+json / <code>*/*</code></td></tr>
+  </tbody>
+</table>
+
+<h2>Wyjątek czy <code>Result&lt;T&gt;</code></h2>
+<table>
+  <thead><tr><th></th><th>Wyjątek</th><th><code>Result&lt;T&gt;</code></th></tr></thead>
+  <tbody>
+    <tr><td>Porażka widoczna w sygnaturze</td><td>nie</td><td>tak</td></tr>
+    <tr><td>Da się przeoczyć</td><td>nie</td><td>tak</td></tr>
+    <tr><td>Warstwy pośrednie</td><td>nic nie robią</td><td>każda decyduje</td></tr>
+    <tr><td>Koszt</td><td>rzut ≈ µs</td><td>zwykły zwrot</td></tr>
+    <tr><td>Stosuj do</td><td>sytuacji wyjątkowych, siatki bezpieczeństwa</td><td>porażek spodziewanych (walidacja, reguły)</td></tr>
+  </tbody>
+</table>
+<p><code>Error</code> i <code>ErrorType</code> są wspólne dla obu podejść — przenoszą się do <code>Result</code> bez zmian.</p>
+
+<h2>Zasady bezpieczeństwa</h2>
+<div class="callout warn">
+  Klient dostaje <code>traceId</code>, log dostaje stack trace — nigdy odwrotnie. Developer exception page (pełny stos, ścieżki na dysku, nagłówki) działa tylko w Development i nie jest planem na produkcję.<br>
+  Zasób cudzy zwracaj jako <strong>404, nie 403</strong> — 403 potwierdza, że zasób istnieje. Stąd <code>ErrorType.Forbidden</code> może mapować się na 404 (patrz <a href="cqrs-handlers.html">ściąga CQRS</a>, sekcja o IDOR).
+</div>
+
+<nav class="lesson-nav">
+  <a href="glossary.html">← Glossary</a>
+  <a href="dispatcher-isender.html">Ściąga: Dispatcher</a>
+  <a href="../lessons/0007-bledy-problemdetails.html">Lekcja 0007 →</a>
+</nav>
+</div>
+</body>
+</html>

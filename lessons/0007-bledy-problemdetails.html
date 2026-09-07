@@ -1,0 +1,458 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>0007 · Błędy i ProblemDetails — ASP.NET Core dla frontendowca</title>
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/quiz.js" defer></script>
+<script src="../assets/checklist.js" defer></script>
+</head>
+<body>
+<div class="page">
+<header class="lesson-head">
+  <div class="kicker">Lekcja 0007 · ~25 min · projekt Helpdesk</div>
+  <h1>Błędy: jedno miejsce, jeden format, <code>application/problem+json</code></h1>
+  <p class="subtitle">Cel: przestać zwracać puste 404, w których frontend nie ma czego pokazać. Domena rzuca <code>DomainException</code> z opisanym błędem, jeden handler zamienia go na standardowy JSON, a endpointy przestają rozgałęziać się na <code>if</code>.</p>
+  <p class="meta">Wymaga: <a href="0006-dispatcher-isender.html">lekcji 0006</a> (<code>ISender</code>). Ściąga: <a href="../reference/errors-problemdetails.html">Błędy / ProblemDetails</a>.</p>
+</header>
+
+<h2>Problem: API mówi „nie", ale nie mówi „czemu"</h2>
+<p>Tak dziś twoje API odpowiada na cztery różne porażki:</p>
+<table>
+  <thead><tr><th>Żądanie</th><th>Odpowiedź</th><th>Co dostaje frontend</th></tr></thead>
+  <tbody>
+    <tr><td><code>GET /tickets/99</code></td><td>404, brak ciała</td><td>nic — musi sam wymyślić komunikat</td></tr>
+    <tr><td><code>PUT /tickets/99</code></td><td>404, brak ciała</td><td>nic</td></tr>
+    <tr><td><code>POST /tickets</code> z pustym tytułem</td><td>201 — <em>zgłoszenie bez tytułu wjeżdża do bazy</em></td><td>fałszywy sukces</td></tr>
+    <tr><td>cokolwiek rzuci wyjątek</td><td>500 ze stack tracem (w Development)</td><td>ścieżki do plików na dysku</td></tr>
+  </tbody>
+</table>
+<p>Do tego kod. Żeby to 404 w ogóle powstało, informacja „nie ma takiego zgłoszenia" musi przewędrować przez trzy warstwy jako <code>bool</code> albo <code>null</code>:</p>
+<pre><code><span class="cm">// store</span>       <span class="kw">bool</span> Update(<span class="kw">int</span> id, <span class="kw">string</span> title);
+<span class="cm">// handler</span>     <span class="kw">return</span> <span class="ty">Task</span>.FromResult(store.Update(...));   <span class="cm">// przepisuje bool dalej</span>
+<span class="cm">// endpoint</span>    <span class="kw">return</span> updated ? <span class="ty">TypedResults</span>.NoContent() : <span class="ty">TypedResults</span>.NotFound();</code></pre>
+<div class="callout warn">
+  Ten <code>bool</code> to dokładnie ten sam <code>bool</code>, który w lekcji 0006 miał literówkę: <code>updated ? NotFound() : NotFound()</code>. Kompilator nie miał czego złapać — oba ramiona to poprawny typ. <strong>Wartość <code>false</code> nie niesie powodu, więc nic nie pilnuje, żebyś obsłużył ją poprawnie.</strong>
+</div>
+<div class="callout analogy">
+  W Vue robisz <code>const res = await fetch(...)</code> i sprawdzasz <code>res.ok</code>. Puste 404 daje ci tyle, że „coś nie wyszło". Żeby pokazać toast „Zgłoszenie 99 nie istnieje" albo podświetlić pole formularza, potrzebujesz <em>ciała odpowiedzi z kodem błędu</em> — czegoś, na czym można zrobić <code>switch</code>.
+</div>
+
+<h2>Standard, którego nie trzeba wymyślać: RFC 9457</h2>
+<p>Format ciała błędu jest wystandaryzowany — <a href="https://www.rfc-editor.org/rfc/rfc9457">RFC 9457 <em>Problem Details for HTTP APIs</em></a> (wcześniej RFC 7807). ASP.NET Core ma go wbudowanego jako <code>ProblemDetails</code>. Wygląda tak:</p>
+<pre><code>{
+  <span class="str">"type"</span>: <span class="str">"https://tools.ietf.org/html/rfc9110#section-15.5.5"</span>,
+  <span class="str">"title"</span>: <span class="str">"Nie znaleziono"</span>,
+  <span class="str">"status"</span>: 404,
+  <span class="str">"detail"</span>: <span class="str">"Zgłoszenie 99 nie istnieje."</span>,
+  <span class="str">"code"</span>: <span class="str">"ticket.not_found"</span>,
+  <span class="str">"traceId"</span>: <span class="str">"00-2f9129be428a3154d89b415b28969d6c-38ca5323db86d193-00"</span>
+}</code></pre>
+<table>
+  <thead><tr><th>Pole</th><th>Dla kogo</th><th>Uwagi</th></tr></thead>
+  <tbody>
+    <tr><td><code>type</code></td><td>maszyna</td><td>URI opisujący klasę problemu; framework wstawia link do RFC</td></tr>
+    <tr><td><code>title</code></td><td>człowiek</td><td>krótkie, <em>niezmienne</em> dla danego typu</td></tr>
+    <tr><td><code>status</code></td><td>oba</td><td>powtórzenie kodu HTTP w ciele</td></tr>
+    <tr><td><code>detail</code></td><td>człowiek</td><td>ten konkretny przypadek („zgłoszenie 99")</td></tr>
+    <tr><td><code>code</code></td><td>maszyna</td><td><strong>rozszerzenie własne</strong> — na tym frontend robi <code>switch</code></td></tr>
+    <tr><td><code>traceId</code></td><td>support</td><td>dokleja framework; łączy odpowiedź z logiem</td></tr>
+  </tbody>
+</table>
+<p>Nagłówek to <code>Content-Type: application/problem+json</code> — nie zwykły <code>application/json</code>. Dzięki temu klient odróżnia „ciało z danymi" od „ciała z błędem" bez patrzenia na kod statusu.</p>
+<div class="callout">
+  <strong>Czemu <code>code</code>, skoro jest <code>status</code>?</strong> Bo 400 znaczy dwadzieścia różnych rzeczy. Frontend nie może budować logiki na <code>detail</code> (to tekst dla człowieka, zmieni się przy pierwszej korekcie stylistycznej) ani na samym 400. <code>ticket.empty_title</code> jest stabilne i można je zmapować na tłumaczenie i na pole formularza.
+</div>
+
+<h3>Co frontend realnie robi z <code>code</code></h3>
+<p>To nie jest pole „na wszelki wypadek". Pięć konkretnych zastosowań, wszystkie z twojego świata:</p>
+<table>
+  <thead><tr><th>Przypadek użycia</th><th>Bez <code>code</code></th><th>Z <code>code</code></th></tr></thead>
+  <tbody>
+    <tr><td><strong>Tłumaczenia.</strong> Backend mówi po polsku, aplikacja ma trzy języki</td><td>wyświetlasz <code>detail</code> po polsku albo prosisz backend o i18n</td><td><code>t(`errors.${code}`)</code> — tłumaczenia zostają na froncie, gdzie i tak są</td></tr>
+    <tr><td><strong>Podświetlenie pola formularza</strong></td><td>globalny toast „coś nie tak"</td><td><code>ticket.empty_title</code> → czerwona ramka pod polem <em>Tytuł</em></td></tr>
+    <tr><td><strong>Dwa różne 409</strong> na tym samym endpoincie</td><td>jeden komunikat na oba</td><td><code>ticket.already_closed</code> → odśwież widok; <code>ticket.assigned_to_other</code> → pokaż przycisk „przejmij”</td></tr>
+    <tr><td><strong>Interceptor HTTP</strong> — ponawiać czy nie</td><td>zgadywanie po statusie</td><td><code>switch</code> w jednym miejscu decyduje: retry, wyloguj, pokaż</td></tr>
+    <tr><td><strong>Grupowanie w Sentry</strong></td><td><code>detail</code> ma id w środku → tysiąc osobnych „błędów”</td><td>jedna grupa <code>ticket.not_found</code> z licznikiem</td></tr>
+  </tbody>
+</table>
+<p>W kodzie wygląda to tak — jeden klient HTTP dla całej aplikacji:</p>
+<pre><code><span class="kw">type</span> <span class="ty">Problem</span> = { status: <span class="ty">number</span>; title: <span class="ty">string</span>; detail?: <span class="ty">string</span>; code?: <span class="ty">string</span>; traceId?: <span class="ty">string</span> }
+
+<span class="kw">async function</span> api&lt;<span class="ty">T</span>&gt;(url: <span class="ty">string</span>, init?: <span class="ty">RequestInit</span>): <span class="ty">Promise</span>&lt;<span class="ty">T</span>&gt; {
+  <span class="kw">const</span> res = <span class="kw">await</span> fetch(url, init)
+  <span class="kw">if</span> (res.ok) <span class="kw">return</span> res.json()
+
+  <span class="kw">const</span> problem: <span class="ty">Problem</span> = res.headers.get(<span class="str">'content-type'</span>)?.includes(<span class="str">'problem+json'</span>)
+    ? <span class="kw">await</span> res.json()
+    : { status: res.status, title: res.statusText }
+
+  <span class="kw">throw</span> <span class="kw">new</span> <span class="ty">ApiError</span>(problem)
+}</code></pre>
+<pre><code><span class="cm">// w komponencie — switch po code, nie po tekście i nie po samym 400</span>
+<span class="kw">try</span> {
+  <span class="kw">await</span> createTicket({ title })
+} <span class="kw">catch</span> (e) {
+  <span class="kw">if</span> (!(e <span class="kw">instanceof</span> <span class="ty">ApiError</span>)) <span class="kw">throw</span> e
+
+  <span class="kw">switch</span> (e.problem.code) {
+    <span class="kw">case</span> <span class="str">'ticket.empty_title'</span>:
+      errors.title = t(<span class="str">'errors.ticket.empty_title'</span>); <span class="kw">break</span>
+    <span class="kw">case</span> <span class="str">'ticket.not_found'</span>:
+      <span class="kw">await</span> router.push(<span class="str">'/tickets'</span>); <span class="kw">break</span>
+    <span class="kw">default</span>:
+      toast.error(t(<span class="str">'errors.generic'</span>, { id: e.problem.traceId }))
+  }
+}</code></pre>
+<p>Zwróć uwagę na <code>default</code>: pokazuje <code>traceId</code>. Użytkownik czyta go supportowi, support znajduje po nim wpis w logu z pełnym stosem. To jest cała ścieżka diagnostyczna i dlatego nie musisz wypuszczać stack trace'a na zewnątrz.</p>
+<div class="callout warn">
+  <strong>Kiedy <code>code</code> jest zbędny.</strong> Jeśli jedyne, co robi frontend, to <code>toast.error(detail)</code>, to samo <code>detail</code> wystarczy, a <code>code</code> jest ceremonią. Zysk pojawia się dokładnie tam, gdzie status nie wystarcza: przy 400 (które pole?) i 409 (który konflikt?). Przy 404 i 500 to głównie wygoda dla telemetrii.<br>
+  <strong>Czego <code>code</code> nie powie:</strong> nasz <code>ErrorType.Forbidden</code> mapuje się na 404 z kodem <code>ticket.not_found</code> — frontend <em>celowo</em> nie odróżni „nie ma” od „nie twoje”. Tak ma być; ta informacja jest wyciekiem.
+</div>
+<div class="callout">
+  <strong>A gdy błędnych pól jest pięć naraz?</strong> Jeden <code>code</code> na odpowiedź wtedy nie wystarczy — formularz rejestracji musi dostać komplet w <em>jednej</em> odpowiedzi, inaczej user poprawia pole, klika, i dostaje błąd o kolejnym. Do tego służy <code>ValidationProblemDetails</code>: ten sam problem+json plus pole <code>errors</code> ze słownikiem <code>pole → tablica komunikatów</code>. Osobna ścieżka, bo <code>DomainException</code> niesie z założenia jeden błąd. Budujemy to w <a href="#">lekcji 0008</a> razem z FluentValidation.
+</div>
+
+<h2>Krok 1: błąd jako <em>dane</em>, nie jako tekst</h2>
+<p class="filename">project/Helpdesk/Common/Errors/Error.cs</p>
+<pre><code><span class="kw">namespace</span> Helpdesk.Common.Errors;
+
+<span class="kw">public enum</span> <span class="ty">ErrorType</span>
+{
+    Validation,
+    NotFound,
+    Conflict,
+    Forbidden
+}
+
+<span class="kw">public record</span> <span class="ty">Error</span>(<span class="kw">string</span> Code, <span class="kw">string</span> Message, <span class="ty">ErrorType</span> Type);</code></pre>
+<p>Trzy pola i cała pointa lekcji siedzi w rozdzieleniu dwóch z nich:</p>
+<ul>
+  <li><code>Code</code> — <strong>identyfikator</strong>. Kontrakt z frontendem, nie zmienia się.</li>
+  <li><code>Message</code> — <strong>zdanie dla człowieka</strong>. Może się zmienić, może być tłumaczone.</li>
+  <li><code>Type</code> — <strong>kategoria</strong>. Z niej wyliczymy kod HTTP. Domena mówi „to jest konflikt", a nie „to jest 409" — <em>domena nie wie o HTTP</em>.</li>
+</ul>
+<p><code>enum</code> to zamknięty zbiór nazwanych wartości; w TS pisałbyś <code>type ErrorType = "validation" | "notFound" | …</code>. W C# jest to osobny typ, więc funkcja przyjmująca <code>ErrorType</code> nie przyjmie stringa, a <code>switch</code> po nim kompilator umie sprawdzić.</p>
+
+<h2>Krok 2: wyjątek, który niesie ten błąd</h2>
+<p class="filename">project/Helpdesk/Common/Errors/DomainException.cs</p>
+<pre><code><span class="kw">namespace</span> Helpdesk.Common.Errors;
+
+<span class="kw">public class</span> <span class="ty">DomainException</span>(<span class="ty">Error</span> error) : <span class="ty">Exception</span>(error.Message)
+{
+    <span class="kw">public</span> <span class="ty">Error</span> Error { <span class="kw">get</span>; } = error;
+}</code></pre>
+<p>Jedna klasa, jedno pole. <code>: Exception(error.Message)</code> woła konstruktor klasy bazowej — dzięki temu w logu i debuggerze widać sensowny komunikat, a nie samą nazwę typu.</p>
+<p>Po co w ogóle wyjątek, skoro błąd jest już danymi? Bo wyjątek <strong>przeskakuje warstwy bez ich zmieniania</strong>. Handler jest siedem ramek stosu poniżej endpointu — z <code>throw</code> nie musi go o niczym informować żaden typ pośredni. Cenę tego rozwiązania rozliczymy na końcu lekcji.</p>
+<div class="callout analogy">
+  <code>throw new DomainException(...)</code> ≈ <code>throw new AppError(...)</code> w JS. Różnica: w C# łapiemy po <em>typie</em> (<code>is DomainException</code>), a nie po <code>err.name === "AppError"</code>. Typ jest nie do podrobienia i nie do zliterówkowania.
+</div>
+
+<h2>Krok 3: katalog błędów feature'u</h2>
+<p class="filename">project/Helpdesk/Features/Tickets/TicketErrors.cs</p>
+<pre><code><span class="kw">using</span> Helpdesk.Common.Errors;
+
+<span class="kw">namespace</span> Helpdesk.Features.Tickets;
+
+<span class="kw">public static class</span> <span class="ty">TicketErrors</span>
+{
+    <span class="kw">public static</span> <span class="ty">Error</span> NotFound(<span class="kw">int</span> id) =&gt;
+        <span class="kw">new</span>(<span class="str">"ticket.not_found"</span>, $<span class="str">"Zgłoszenie {id} nie istnieje."</span>, <span class="ty">ErrorType</span>.NotFound);
+
+    <span class="kw">public static readonly</span> <span class="ty">Error</span> EmptyTitle =
+        <span class="kw">new</span>(<span class="str">"ticket.empty_title"</span>, <span class="str">"Tytuł zgłoszenia nie może być pusty."</span>, <span class="ty">ErrorType</span>.Validation);
+}</code></pre>
+<p>Metoda tam, gdzie komunikat potrzebuje parametru; <code>readonly</code> pole tam, gdzie jest stały. Katalog daje trzy rzeczy naraz:</p>
+<ul>
+  <li><strong>Nie ma dwóch literówek tego samego kodu.</strong> <code>"ticket.not_found"</code> występuje w repo dokładnie raz.</li>
+  <li><strong>Widać cały kontrakt błędów feature'u w jednym pliku</strong> — to jest lista, którą wysyłasz frontendowi.</li>
+  <li><strong>Zmiana treści komunikatu to jedna linia</strong>, nie grep po projekcie.</li>
+</ul>
+<p>Katalog mieszka w feature (<code>Features/Tickets/</code>), nie w <code>Common/</code> — błędy zgłoszeń to sprawa zgłoszeń. To ta sama zasada, co przy vertical slices w <a href="0004-vertical-slices.html">lekcji 0004</a>.</p>
+
+<h2>Krok 4: jeden handler zamienia wyjątek na odpowiedź</h2>
+<p>ASP.NET Core ma do tego dedykowany interfejs: <code>IExceptionHandler</code>. Rejestrujesz implementacje, a middleware wyjątków podaje im każdy nieobsłużony wyjątek po kolei.</p>
+<p class="filename">project/Helpdesk/Common/Errors/DomainExceptionHandler.cs</p>
+<pre><code><span class="kw">using</span> Microsoft.AspNetCore.Diagnostics;
+
+<span class="kw">namespace</span> Helpdesk.Common.Errors;
+
+<span class="kw">public class</span> <span class="ty">DomainExceptionHandler</span>(<span class="ty">IProblemDetailsService</span> problemDetailsService) : <span class="ty">IExceptionHandler</span>
+{
+    <span class="kw">public async</span> <span class="ty">ValueTask</span>&lt;<span class="kw">bool</span>&gt; TryHandleAsync(
+        <span class="ty">HttpContext</span> httpContext,
+        <span class="ty">Exception</span> exception,
+        <span class="ty">CancellationToken</span> cancellationToken)
+    {
+        <span class="kw">if</span> (exception <span class="kw">is not</span> <span class="ty">DomainException</span> domainException)
+        {
+            <span class="kw">return false</span>;
+        }
+
+        <span class="kw">var</span> error = domainException.Error;
+        httpContext.Response.StatusCode = StatusFor(error.Type);
+
+        <span class="kw">return await</span> problemDetailsService.TryWriteAsync(<span class="kw">new</span> <span class="ty">ProblemDetailsContext</span>
+        {
+            HttpContext = httpContext,
+            Exception = exception,
+            ProblemDetails =
+            {
+                Title = TitleFor(error.Type),
+                Detail = error.Message,
+                Status = httpContext.Response.StatusCode,
+                Extensions = { [<span class="str">"code"</span>] = error.Code }
+            }
+        });
+    }
+
+    <span class="kw">private static int</span> StatusFor(<span class="ty">ErrorType</span> type) =&gt; type <span class="kw">switch</span>
+    {
+        <span class="ty">ErrorType</span>.Validation =&gt; <span class="ty">StatusCodes</span>.Status400BadRequest,
+        <span class="ty">ErrorType</span>.NotFound =&gt; <span class="ty">StatusCodes</span>.Status404NotFound,
+        <span class="ty">ErrorType</span>.Conflict =&gt; <span class="ty">StatusCodes</span>.Status409Conflict,
+        <span class="ty">ErrorType</span>.Forbidden =&gt; <span class="ty">StatusCodes</span>.Status404NotFound,
+        _ =&gt; <span class="ty">StatusCodes</span>.Status500InternalServerError
+    };
+
+    <span class="kw">private static string</span> TitleFor(<span class="ty">ErrorType</span> type) =&gt; type <span class="kw">switch</span>
+    {
+        <span class="ty">ErrorType</span>.Validation =&gt; <span class="str">"Nieprawidłowe żądanie"</span>,
+        <span class="ty">ErrorType</span>.NotFound =&gt; <span class="str">"Nie znaleziono"</span>,
+        <span class="ty">ErrorType</span>.Conflict =&gt; <span class="str">"Konflikt stanu"</span>,
+        <span class="ty">ErrorType</span>.Forbidden =&gt; <span class="str">"Nie znaleziono"</span>,
+        _ =&gt; <span class="str">"Błąd serwera"</span>
+    };
+}</code></pre>
+<table>
+  <thead><tr><th>Linia</th><th>Co robi</th></tr></thead>
+  <tbody>
+    <tr><td><code>is not DomainException … return false</code></td><td><code>false</code> = „to nie mój wyjątek, dawaj następnemu". Handlery idą w kolejności rejestracji; jeśli <strong>wszystkie</strong> zwrócą <code>false</code>, wchodzi zachowanie domyślne (u nas: generyczne 500 problem+json).</td></tr>
+    <tr><td><code>is not X y</code></td><td><em>pattern matching</em> z deklaracją zmiennej: jeśli typ pasuje, <code>y</code> jest już rzutowane. Odpowiednik <code>if (!(e instanceof X)) return</code>, tyle że <code>y</code> ma typ.</td></tr>
+    <tr><td><code>Response.StatusCode = …</code></td><td>kod HTTP wyliczony z kategorii błędu. Musi być ustawiony <em>przed</em> pisaniem ciała.</td></tr>
+    <tr><td><code>TryWriteAsync</code></td><td>pisze ciało w formacie problem+json. Zwraca <code>false</code>, gdy klient prosi o format, którego pisarz nie umie (np. <code>Accept: application/xml</code>) — wtedy dalej działa domyślna obsługa.</td></tr>
+    <tr><td><code>Extensions["code"]</code></td><td>dokłada nasze własne pole do standardowego JSON-a. RFC 9457 wprost na to pozwala.</td></tr>
+    <tr><td><code>ProblemDetails = { … }</code></td><td>zagnieżdżony inicjalizator: ustawia pola <em>istniejącego</em> obiektu (kontekst tworzy go sam), nie przypisuje nowego.</td></tr>
+  </tbody>
+</table>
+<div class="callout warn">
+  <strong>Zwrócenie <code>true</code> bez napisania odpowiedzi daje 404.</strong> Middleware uzna, że obsłużyłeś wyjątek, a że nikt nic nie napisał — klient dostaje puste 404 i w logu ląduje <code>The exception handler configured on ExceptionHandlerOptions produced a 404 status response.</code> Handler, który zwraca <code>true</code>, musi napisać <em>całą</em> odpowiedź razem ze statusem (<a href="https://learn.microsoft.com/aspnet/core/fundamentals/error-handling?view=aspnetcore-10.0#iexceptionhandler">docs</a>).
+</div>
+
+<h3>Rejestracja: dwie linijki i jedno miejsce w pipeline</h3>
+<p class="filename">project/Helpdesk/Common/CommonServices.cs</p>
+<pre><code><span class="kw">public static</span> <span class="ty">IServiceCollection</span> AddDomainErrors(<span class="kw">this</span> <span class="ty">IServiceCollection</span> services)
+{
+    services.AddProblemDetails();
+    services.AddExceptionHandler&lt;<span class="ty">DomainExceptionHandler</span>&gt;();
+
+    <span class="kw">return</span> services;
+}</code></pre>
+<p class="filename">project/Helpdesk/Program.cs</p>
+<pre><code>builder.Services.AddCurrentUser();
+builder.Services.AddDomainErrors();
+builder.Services.AddDispatcher();
+
+<span class="kw">var</span> app = builder.Build();
+
+app.UseExceptionHandler();</code></pre>
+<p>Kolejność w <code>Program.cs</code> jest istotna: <code>UseExceptionHandler()</code> to <strong>middleware</strong>, a nie rejestracja. Musi stać <em>przed</em> <code>MapTickets()</code>, bo działa jak <code>try/catch</code> owinięty wokół wszystkiego, co jest dalej. Cokolwiek zamapujesz wyżej — nie jest chronione.</p>
+<div class="callout warn">
+  <strong>Handler jest Singletonem.</strong> <code>AddExceptionHandler&lt;T&gt;()</code> rejestruje go jako Singleton (widać to w komunikacie błędu: <code>ServiceType: …IExceptionHandler Lifetime: Singleton</code>). Nie wstrzykniesz w niego <code>ICurrentUser</code> ani żadnego Scoped — to captive dependency z <a href="0002-di-lifetimes.html">lekcji 0002</a>. Potrzebujesz danych żądania? Bierzesz je z <code>httpContext</code>, który dostajesz parametrem.
+</div>
+
+<h2>Krok 5: co znika z kodu</h2>
+<p>Teraz kaskada. Skoro handler potrafi opisać porażkę, warstwy pośrednie przestają ją przepisywać.</p>
+<h3>Handler zamiast <code>bool</code> rzuca</h3>
+<pre><code><span class="cm">// przed</span>
+<span class="kw">public</span> <span class="ty">Task</span>&lt;<span class="kw">bool</span>&gt; HandleAsync(<span class="ty">DeleteTicketCommand</span> command, <span class="ty">CancellationToken</span> ct = <span class="kw">default</span>)
+    =&gt; <span class="ty">Task</span>.FromResult(store.Delete(command.Id));
+
+<span class="cm">// po</span>
+<span class="kw">public</span> <span class="ty">Task</span>&lt;<span class="ty">Unit</span>&gt; HandleAsync(<span class="ty">DeleteTicketCommand</span> command, <span class="ty">CancellationToken</span> ct = <span class="kw">default</span>)
+{
+    <span class="kw">if</span> (!store.Delete(command.Id))
+    {
+        <span class="kw">throw new</span> <span class="ty">DomainException</span>(<span class="ty">TicketErrors</span>.NotFound(command.Id));
+    }
+
+    <span class="kw">return</span> <span class="ty">Task</span>.FromResult(<span class="ty">Unit</span>.Value);
+}</code></pre>
+<p><code>Unit</code> to nowy typ w <code>Common/</code>, bo generyk nie przyjmuje <code>void</code> — nie da się napisać <code>ICommand&lt;void&gt;</code>. To ta sama sztuczka, którą robi MediatR (<code>Unit</code> dla żądań bez wyniku):</p>
+<pre><code><span class="kw">public readonly record struct</span> <span class="ty">Unit</span>
+{
+    <span class="kw">public static readonly</span> <span class="ty">Unit</span> Value = <span class="kw">new</span>();
+}</code></pre>
+<h3>Query przestaje być nullowalne</h3>
+<pre><code><span class="cm">// przed</span>  <span class="kw">public record</span> <span class="ty">GetTicketQuery</span>(<span class="kw">int</span> Id) : <span class="ty">IQuery</span>&lt;<span class="ty">TicketDto</span>?&gt;;
+<span class="cm">// po</span>    <span class="kw">public record</span> <span class="ty">GetTicketQuery</span>(<span class="kw">int</span> Id) : <span class="ty">IQuery</span>&lt;<span class="ty">TicketDto</span>&gt;;
+
+<span class="kw">var</span> ticket = store.GetById(query.Id) ?? <span class="kw">throw new</span> <span class="ty">DomainException</span>(<span class="ty">TicketErrors</span>.NotFound(query.Id));</code></pre>
+<p><code>??</code> to null-coalescing, znane z JS. Nowość: w C# po prawej stronie może stać <code>throw</code> — <em>throw expression</em>. Czyta się jak zdanie: „weź zgłoszenie, a jak go nie ma, rzuć".</p>
+<h3>Endpoint przestaje rozgałęziać</h3>
+<pre><code><span class="cm">// przed</span>
+<span class="kw">private static async</span> <span class="ty">Task</span>&lt;<span class="ty">Results</span>&lt;<span class="ty">NoContent</span>, <span class="ty">NotFound</span>&gt;&gt; HandleAsync(...)
+{
+    <span class="kw">var</span> deleted = <span class="kw">await</span> sender.Send(<span class="kw">new</span> <span class="ty">DeleteTicketCommand</span>(id), cancellationToken);
+    <span class="kw">return</span> deleted ? <span class="ty">TypedResults</span>.NoContent() : <span class="ty">TypedResults</span>.NotFound();
+}
+
+<span class="cm">// po</span>
+<span class="kw">private static async</span> <span class="ty">Task</span>&lt;<span class="ty">NoContent</span>&gt; HandleAsync(...)
+{
+    <span class="kw">await</span> sender.Send(<span class="kw">new</span> <span class="ty">DeleteTicketCommand</span>(id), cancellationToken);
+
+    <span class="kw">return</span> <span class="ty">TypedResults</span>.NoContent();
+}</code></pre>
+<p>Typ zwrotny zwęził się z <code>Results&lt;NoContent, NotFound&gt;</code> do <code>NoContent</code>. Endpoint mówi teraz tylko o ścieżce sukcesu — <strong>to jest ten zysk, dla którego robimy całą lekcję</strong>. Ta sama zmiana zaszła w <code>GetTicket</code> (<code>Ok&lt;TicketDto&gt;</code>) i <code>UpdateTicket</code>.</p>
+<div class="callout warn">
+  Cena: zwężony typ zwrotny znika też z <strong>dokumentacji OpenAPI</strong>. Wcześniej <code>Results&lt;Ok&lt;TicketDto&gt;, NotFound&gt;</code> samo ogłaszało, że endpoint może dać 404; teraz trzeba to dopisać ręcznie przez <code>.Produces&lt;ProblemDetails&gt;(404)</code>. Wrócimy do tego przy OpenAPI.
+</div>
+
+<h2>Weryfikacja</h2>
+<p>Uruchom (<code>dotnet run</code>) i przejdź całą tabelę. To są prawdziwe odpowiedzi z tego projektu, nie przykłady z dokumentacji:</p>
+<table>
+  <thead><tr><th>Żądanie</th><th>Status</th><th>Ciało</th></tr></thead>
+  <tbody>
+    <tr><td><code>GET /tickets/99</code></td><td>404</td><td><code>"title":"Nie znaleziono"</code>, <code>"detail":"Zgłoszenie 99 nie istnieje."</code>, <code>"code":"ticket.not_found"</code></td></tr>
+    <tr><td><code>PUT /tickets/99</code></td><td>404</td><td>jak wyżej</td></tr>
+    <tr><td><code>POST /tickets</code>, <code>{"title":"  "}</code></td><td>400</td><td><code>"title":"Nieprawidłowe żądanie"</code>, <code>"code":"ticket.empty_title"</code></td></tr>
+    <tr><td><code>PUT /tickets/1</code>, poprawny tytuł</td><td>204</td><td>puste — sukces bez zmian</td></tr>
+    <tr><td><code>POST /tickets</code>, <code>{"title":"drukarka"}</code></td><td>201</td><td><code>{"id":3,"title":"drukarka"}</code></td></tr>
+    <tr><td><code>DELETE /tickets/3</code>, potem to samo</td><td>204, potem 404</td><td>drugie z <code>code</code></td></tr>
+    <tr><td><code>GET /diagnostics/boom</code></td><td>500</td><td><code>"title":"An error occurred while processing your request."</code> — <strong>bez</strong> stack trace'a</td></tr>
+  </tbody>
+</table>
+<p>Ostatni wiersz jest ważniejszy, niż wygląda. <code>/diagnostics/boom</code> rzuca zwykły <code>InvalidOperationException</code>, którego nasz handler <em>nie</em> obsługuje (zwraca <code>false</code>). Domyślne zachowanie napisało poprawne problem+json i <strong>nie wypuściło szczegółów na zewnątrz</strong> — wyjątek poszedł do logu:</p>
+<pre><code>fail: Microsoft.AspNetCore.Diagnostics.ExceptionHandlerMiddleware[1]
+      System.InvalidOperationException: Celowy błąd, którego nikt nie obsługuje.
+         at Helpdesk.Features.Diagnostics.Boom.BoomEndpoint.HandleAsync() ...</code></pre>
+<p>Podział ról: <strong>klient dostaje <code>traceId</code>, log dostaje stack trace</strong>. Support łączy jedno z drugim.</p>
+
+<h2>Trzy błędy, które zobaczysz w praktyce</h2>
+<h3>1. Zapomniany <code>app.UseExceptionHandler()</code></h3>
+<p>Aplikacja wstaje normalnie. <code>GET /tickets/99</code> daje <strong>500</strong>, a w Development w ciele odpowiedzi ląduje to:</p>
+<pre><code>{"type":"...#section-15.6.1","title":"Helpdesk.Common.Errors.DomainException","status":500,
+ "detail":"Zgłoszenie 99 nie istnieje.",
+ "exception":{"details":"Helpdesk.Common.Errors.DomainException: ...
+    at Helpdesk.Features.Tickets.Queries.GetTicket.GetTicketHandler.HandleAsync(...) in
+    C:\\Users\\wojciech.krol\\...\\GetTicketHandler.cs:line 10 ...",
+  "headers":{...},"path":"/tickets/99","routeValues":{"id":"99"}}}</code></pre>
+<p>Odpowiada developer exception page: pełny stos, ścieżki na dysku, nagłówki żądania. Na produkcji tego nie ma (środowisko inne), ale statusem dalej jest 500 zamiast 404 — więc frontend widzi awarię tam, gdzie jest zwykły brak zasobu.</p>
+<h3>2. <code>AddExceptionHandler</code> bez <code>AddProblemDetails</code></h3>
+<p>Aplikacja <strong>nie wstaje</strong>, bo kontener sprawdza zależności przy starcie:</p>
+<pre><code>Unhandled exception. System.AggregateException: Some services are not able to be constructed
+ (Error while validating the service descriptor 'ServiceType:
+  Microsoft.AspNetCore.Diagnostics.IExceptionHandler Lifetime: Singleton
+  ImplementationType: Helpdesk.Common.Errors.DomainExceptionHandler':
+  Unable to resolve service for type 'Microsoft.AspNetCore.Http.IProblemDetailsService'
+  while attempting to activate 'Helpdesk.Common.Errors.DomainExceptionHandler'.)</code></pre>
+<p>To ten sam mechanizm, który złapał captive dependency w lekcji 0002 — i tu widać czarno na białym, że handler jest <strong>Singletonem</strong>.</p>
+<h3>3. <code>UseExceptionHandler()</code> bez niczego, co da fallback</h3>
+<p>Gdyby zabrakło zarówno <code>AddProblemDetails()</code>, jak i ścieżki błędu, samo wywołanie bezargumentowe wywala się przy starcie:</p>
+<pre><code>System.InvalidOperationException: An error occurred when configuring the exception handler
+middleware. Either the 'ExceptionHandlingPath' or the 'ExceptionHandler' property must be
+set in 'UseExceptionHandler()'.</code></pre>
+<p>Middleware wymaga planu B na wyjątki, których nie obsłużył żaden <code>IExceptionHandler</code> (<a href="https://learn.microsoft.com/aspnet/core/fundamentals/error-handling?view=aspnetcore-10.0#iexceptionhandler">docs</a>).</p>
+
+<h2>Wyjątki czy Result? Uczciwe porównanie</h2>
+<p>Zrobiliśmy wersję na wyjątkach. Twój zespół — sądząc po stylu Milana Jovanovicia — używa <strong>Result pattern</strong>: handler zwraca <code>Result&lt;TicketDto&gt;</code>, czyli albo wartość, albo <code>Error</code>, i nikt nic nie rzuca. Warto wiedzieć, czym się różnią, zanim zobaczysz to w firmowym repo.</p>
+<table>
+  <thead><tr><th></th><th>Wyjątek + <code>IExceptionHandler</code></th><th><code>Result&lt;T&gt;</code></th></tr></thead>
+  <tbody>
+    <tr><td>Widać w sygnaturze, że może się nie udać</td><td>nie</td><td>tak</td></tr>
+    <tr><td>Da się zignorować porażkę</td><td>nie (leci w górę)</td><td>tak (nikt nie każe sprawdzić)</td></tr>
+    <tr><td>Kod warstw pośrednich</td><td>nic nie przepisuje</td><td>każda warstwa musi zdecydować</td></tr>
+    <tr><td>Koszt wykonania</td><td>rzucenie jest drogie (rząd µs)</td><td>zwykły zwrot wartości</td></tr>
+    <tr><td>Endpoint</td><td>tylko ścieżka sukcesu</td><td>mapowanie <code>Result</code> → status</td></tr>
+    <tr><td>Debugger „break on exception"</td><td>zatrzymuje się na regułach biznesowych</td><td>cisza</td></tr>
+  </tbody>
+</table>
+<p>Reguła praktyczna: <strong>wyjątek do sytuacji naprawdę wyjątkowych, <code>Result</code> do porażek spodziewanych</strong> (walidacja formularza to nie awaria). Duże systemy często mają oba: <code>Result</code> wewnątrz domeny, a <code>IExceptionHandler</code> jako siatka bezpieczeństwa na wszystko, co się przez nią przedostanie. <code>Error</code> i <code>ErrorType</code>, które właśnie napisałeś, przenoszą się do <code>Result</code> jeden do jednego — dlatego zaczęliśmy od nich. Result pattern budujemy w <a href="#">lekcji 0008</a> przy okazji FluentValidation.</p>
+
+<div class="quiz" data-answer="1">
+  <div class="q">Handler <code>TryHandleAsync</code> zwraca <code>false</code>. Co się dzieje?</div>
+  <button class="opt">Klient dostaje puste 404 i w logu jest ostrzeżenie</button>
+  <button class="opt">Wyjątek idzie do następnego handlera albo do zachowania domyślnego</button>
+  <button class="opt">Middleware natychmiast przerywa i zwraca 500 bez logu</button>
+  <div class="why"><code>false</code> znaczy „nie mój wyjątek". Handlery idą po kolei; gdy wszystkie odmówią, wchodzi fallback (u nas generyczne problem+json 500). To puste 404 z pierwszej odpowiedzi jest pułapką odwrotną: dostaniesz je, gdy zwrócisz <code>true</code>, nic nie pisząc.</div>
+</div>
+
+<div class="quiz" data-answer="2">
+  <div class="q">Na czym frontend ma budować obsługę konkretnego błędu?</div>
+  <button class="opt">Na polu <code>detail</code>, bo opisuje ten właśnie przypadek</button>
+  <button class="opt">Na kodzie HTTP, bo jest wystandaryzowany w RFC</button>
+  <button class="opt">Na polu <code>code</code>, bo jest stabilne i jednoznaczne</button>
+  <div class="why"><code>detail</code> to tekst dla człowieka — zmieni się przy pierwszej korekcie. Sam status HTTP jest za gruby: pod 400 kryje się dwadzieścia różnych powodów. <code>ticket.empty_title</code> jest jedno i to samo zawsze, więc mapuje się na tłumaczenie i na pole formularza.</div>
+</div>
+
+<div class="quiz" data-answer="0">
+  <div class="q">Czemu <code>ErrorType</code> ma <code>NotFound</code>, a nie <code>Status404</code>?</div>
+  <button class="opt">Bo domena nie zna HTTP; kod statusu wylicza dopiero warstwa web</button>
+  <button class="opt">Bo enum w C# nie może przechowywać wartości liczbowych</button>
+  <button class="opt">Bo ProblemDetails wymaga nazwy tekstowej, nie liczby</button>
+  <div class="why">Ten sam handler może kiedyś obsługiwać kolejkę wiadomości albo gRPC, gdzie 404 nie znaczy nic. Domena mówi „nie znalazłem"; tłumaczenie na protokół to jedno miejsce — <code>StatusFor</code>. Enum w C# jak najbardziej trzyma liczby, a ProblemDetails przyjmuje <code>int</code>.</div>
+</div>
+
+<div class="quiz" data-answer="1">
+  <div class="q">Gdzie w <code>Program.cs</code> musi stać <code>app.UseExceptionHandler()</code>?</div>
+  <button class="opt">Gdziekolwiek — to rejestracja usługi, kolejność nie gra roli</button>
+  <button class="opt">Przed mapowaniem endpointów, bo owija to, co jest dalej</button>
+  <button class="opt">Na samym końcu, tuż przed wywołaniem <code>app.Run()</code></button>
+  <div class="why">To middleware, czyli warstwa <code>try/catch</code> nałożona na resztę pipeline'u. Endpointy zamapowane wcześniej niż ono nie są chronione. Rejestracje (<code>AddProblemDetails</code>, <code>AddExceptionHandler</code>) idą wcześniej, do <code>builder.Services</code>.</div>
+</div>
+
+<div class="task">
+  <h3>Zadanie</h3>
+  <ol>
+    <li>Przeczytaj trzy nowe pliki w <code>Common/Errors/</code> i <code>Features/Tickets/TicketErrors.cs</code>.</li>
+    <li>Zatrzymaj się na <code>StatusFor</code>: <code>Forbidden</code> mapuje się na <strong>404</strong>, nie na 403. Umiesz uzasadnić dlaczego? (odpowiedź: sekcja o IDOR w <a href="0005-command-query-handlery.html">lekcji 0005</a>).</li>
+    <li>Uruchom aplikację i strzel <code>GET /tickets/99</code> — 404 z polem <code>code</code>.</li>
+    <li>Przejdź całą tabelę weryfikacyjną — łącznie z <code>/diagnostics/boom</code> i pustym tytułem w POST.</li>
+    <li>Zepsuj celowo: zakomentuj <code>app.UseExceptionHandler();</code> i zobacz błąd&nbsp;1 na własne oczy. Potem przywróć i zakomentuj <code>services.AddProblemDetails();</code> — błąd&nbsp;2 wywali start aplikacji.</li>
+    <li><code>git diff project/Helpdesk/Features/Tickets</code> — popatrz, ile <code>if</code>-ów zniknęło z endpointów.</li>
+  </ol>
+  <div class="check">
+    <label><input type="checkbox" id="c1"> Rozumiem podział <code>Code</code> (maszyna) / <code>Message</code> (człowiek) / <code>Type</code> (kategoria)</label>
+    <label><input type="checkbox" id="c2"> Wiem, czemu <code>Forbidden</code> daje 404, a nie 403</label>
+    <label><input type="checkbox" id="c3"> Cała tabela weryfikacyjna się zgadza</label>
+    <label><input type="checkbox" id="c4"> Widziałem błąd bez <code>UseExceptionHandler</code> i bez <code>AddProblemDetails</code></label>
+    <label><input type="checkbox" id="c5"> Widzę w diffie, że endpointy zwracają jeden typ zamiast <code>Results&lt;…&gt;</code></label>
+    <label><input type="checkbox" id="c6"> Umiem powiedzieć, kiedy wybrać <code>Result&lt;T&gt;</code> zamiast wyjątku</label>
+  </div>
+</div>
+
+<h2>Zapamiętaj bez zaglądania</h2>
+<details class="recall">
+  <summary>Co dokładnie wychodzi w odpowiedzi, a co zostaje w logu?</summary>
+  <p>Na zewnątrz: <code>type</code>, <code>title</code>, <code>status</code>, <code>detail</code>, <code>code</code>, <code>traceId</code>. W logu: pełny stack trace z nazwami plików i linii. Łącznikiem jest <code>traceId</code> — użytkownik podaje go supportowi, support znajduje po nim wpis w logu.</p>
+</details>
+<details class="recall">
+  <summary>Trzy błędy z tej lekcji — który wychodzi kiedy?</summary>
+  <p>Brak <code>AddProblemDetails()</code> i bezargumentowe <code>UseExceptionHandler()</code> bez fallbacku — <strong>przy starcie</strong>, aplikacja nie wstaje. Zapomniane <code>app.UseExceptionHandler()</code> — dopiero <strong>przy żądaniu</strong>, jako 500 zamiast 404. Reguła: czego kontener nie może zbudować, to wywala start; czego brakuje w pipelinie, to wychodzi przy ruchu.</p>
+</details>
+<details class="recall">
+  <summary>Czemu <code>Unit</code>, a nie <code>ICommand&lt;void&gt;</code>?</summary>
+  <p><code>void</code> nie jest typem, tylko oznaczeniem braku wyniku — nie da się go podstawić pod parametr generyczny. <code>Unit</code> to pusta struktura z jedną wartością <code>Unit.Value</code>, która ten brak reprezentuje. MediatR robi dokładnie to samo.</p>
+</details>
+
+<h2>Źródło pierwotne</h2>
+<div class="callout source">
+  <a href="https://learn.microsoft.com/aspnet/core/fundamentals/error-handling-api?view=aspnetcore-10.0">Handle errors in ASP.NET Core APIs</a> (ok. 12 min) — czytaj zakładkę <strong>Minimal APIs</strong>, sekcje <em>Problem details</em> i <em>IExceptionHandler</em>. Dla formatu samego ciała: <a href="https://www.rfc-editor.org/rfc/rfc9457">RFC 9457</a> — wystarczą sekcje 3 i 3.2 (pola i rozszerzenia).
+</div>
+<div class="callout ask">
+  Coś nie działa albo nie klika? Pytaj — po to tu jestem. Szczególnie warto zapytać, jak twój zespół robi to u siebie: wyjątkami czy <code>Result</code>, i czy mają swój katalog kodów błędów.
+</div>
+
+<h2>Co dalej</h2>
+<p>Lekcja 0008: <strong>FluentValidation + pipeline behavior</strong>. Dziś walidacja pustego tytułu siedzi w środku handlera, wymieszana z logiką. Wyniesiemy ją do osobnego walidatora i wepniemy w jedno miejsce, przez które przechodzi <em>każdy</em> command — czyli w końcu wykorzystamy to, po co budowaliśmy dispatcher w lekcji 0006.</p>
+
+<nav class="lesson-nav">
+  <a href="0006-dispatcher-isender.html">← Lekcja 0006</a>
+  <a href="../reference/errors-problemdetails.html">Ściąga: Błędy / ProblemDetails</a>
+  <a href="#">Lekcja 0008 →</a>
+</nav>
+</div>
+</body>
+</html>

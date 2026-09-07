@@ -144,6 +144,27 @@
 
   <dt>Validator <span class="pl">— walidator</span></dt>
   <dd>Klasa opisująca reguły poprawności requestu, np. <code>RuleFor(x =&gt; x.Title).NotEmpty()</code> (FluentValidation). Uruchamiana w pipeline behavior przed handlerem.</dd>
+
+  <dt>Unit</dt>
+  <dd>Pusta struktura z jedną wartością (<code>Unit.Value</code>), reprezentująca „brak wyniku". Potrzebna, bo <code>void</code> nie jest typem i nie da się napisać <code>ICommand&lt;void&gt;</code>. MediatR ma własny <code>Unit</code> o tym samym znaczeniu. Zobacz <a href="../lessons/0007-bledy-problemdetails.html">lekcję 0007</a>.</dd>
+</dl>
+
+<h2>Błędy</h2>
+<dl class="glossary">
+  <dt>ProblemDetails</dt>
+  <dd>Standardowy kształt ciała odpowiedzi błędu wg <a href="https://www.rfc-editor.org/rfc/rfc9457">RFC 9457</a>: <code>type</code>, <code>title</code>, <code>status</code>, <code>detail</code>, <code>instance</code> plus dowolne rozszerzenia. Nagłówek <code>Content-Type: application/problem+json</code>. Wbudowany w ASP.NET Core, włączany przez <code>AddProblemDetails()</code>. Ściąga: <a href="errors-problemdetails.html">Błędy / ProblemDetails</a>.</dd>
+
+  <dt>Kod błędu <span class="pl">— error code</span></dt>
+  <dd>Stabilny identyfikator maszynowy w rozszerzeniu <code>code</code>, np. <code>ticket.not_found</code>. Kontrakt z frontendem: na nim robi się <code>switch</code> i mapowanie na tłumaczenia. W odróżnieniu od <code>detail</code>, który jest tekstem dla człowieka i może się zmienić.</dd>
+
+  <dt>Błąd domenowy <span class="pl">— domain error</span></dt>
+  <dd>Porażka opisana językiem domeny (<code>NotFound</code>, <code>Conflict</code>), a nie protokołu (404, 409). Rekord <code>Error(Code, Message, Type)</code>. Tłumaczenie kategorii na kod HTTP należy do warstwy web, nie do domeny.</dd>
+
+  <dt>IExceptionHandler</dt>
+  <dd>Interfejs ASP.NET Core z metodą <code>TryHandleAsync</code>. Rejestrowany przez <code>AddExceptionHandler&lt;T&gt;()</code> (jako <strong>Singleton</strong>), uruchamiany przez middleware <code>UseExceptionHandler()</code>. <code>false</code> = „nie mój wyjątek, dawaj następnemu"; <code>true</code> = „obsłużone" i wtedy trzeba napisać całą odpowiedź.</dd>
+
+  <dt>Result pattern</dt>
+  <dd>Alternatywa dla wyjątków: handler zwraca <code>Result&lt;T&gt;</code> — albo wartość, albo <code>Error</code>. Porażka jest widoczna w sygnaturze, ale każda warstwa musi ją obsłużyć. Styl spotykany u Milana Jovanovicia i w firmowym repo.</dd>
 </dl>
 
 <h2>Dane</h2>

@@ -8,12 +8,13 @@ public static class DeleteTicketEndpoint
     public static void Map(RouteGroupBuilder tickets) =>
         tickets.MapDelete("/{id:int}", HandleAsync).WithName("DeleteTicket");
 
-    private static async Task<Results<NoContent, NotFound>> HandleAsync(
+    private static async Task<NoContent> HandleAsync(
         int id,
         ISender sender,
         CancellationToken cancellationToken)
     {
-        var deleted = await sender.Send(new DeleteTicketCommand(id), cancellationToken);
-        return deleted ? TypedResults.NoContent() : TypedResults.NotFound();
+        await sender.Send(new DeleteTicketCommand(id), cancellationToken);
+
+        return TypedResults.NoContent();
     }
 }

@@ -16,10 +16,10 @@ public static class TicketsFeature
         services.AddSingleton<TicketMetrics>();
 
         services.AddScoped<ICommandHandler<CreateTicketCommand, TicketDto>, CreateTicketHandler>();
-        services.AddScoped<ICommandHandler<UpdateTicketCommand, bool>, UpdateTicketHandler>();
-        services.AddScoped<ICommandHandler<DeleteTicketCommand, bool>, DeleteTicketHandler>();
+        services.AddScoped<ICommandHandler<UpdateTicketCommand, Unit>, UpdateTicketHandler>();
+        services.AddScoped<ICommandHandler<DeleteTicketCommand, Unit>, DeleteTicketHandler>();
 
-        services.AddScoped<IQueryHandler<GetTicketQuery, TicketDto?>, GetTicketHandler>();
+        services.AddScoped<IQueryHandler<GetTicketQuery, TicketDto>, GetTicketHandler>();
         services.AddScoped<IQueryHandler<ListTicketsQuery, IReadOnlyList<TicketDto>>, ListTicketsHandler>();
         services.AddScoped<IQueryHandler<GetTicketMetricsQuery, TicketMetricsDto>, GetTicketMetricsHandler>();
 

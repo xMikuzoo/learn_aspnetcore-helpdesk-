@@ -1,3 +1,4 @@
+using Helpdesk.Features.Diagnostics.Boom;
 using Helpdesk.Features.Diagnostics.Lifetimes;
 
 namespace Helpdesk.Features.Diagnostics;
@@ -17,6 +18,7 @@ public static class DiagnosticsFeature
         var diagnostics = app.MapGroup("/diagnostics").WithTags("Diagnostics");
 
         LifetimesEndpoint.Map(diagnostics);
+        BoomEndpoint.Map(diagnostics);
 
         return diagnostics;
     }
