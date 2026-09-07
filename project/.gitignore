@@ -41,3 +41,8 @@ PublishProfiles/
 # System operacyjny
 .DS_Store
 Thumbs.db
+
+# Lokalna baza SQLite – odtwarzalna z migracji przez `dotnet ef database update`
+*.db
+*.db-shm
+*.db-wal

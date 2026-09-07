@@ -1,0 +1,571 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>0009 · EF Core + SQLite — ASP.NET Core dla frontendowca</title>
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/quiz.js" defer></script>
+<script src="../assets/checklist.js" defer></script>
+</head>
+<body>
+<div class="page">
+<header class="lesson-head">
+  <div class="kicker">Lekcja 0009 · ~25 min · projekt Helpdesk</div>
+  <h1>Prawdziwa baza: <code>EF Core</code>, <code>SQLite</code> i migracje</h1>
+  <p class="subtitle">Cel: wymienić <code>InMemoryTicketStore</code> na bazę na dysku, wygenerować i zaaplikować pierwszą migrację, zobaczyć SQL, który EF wysyła w twoim imieniu — i wreszcie napisać handler, w którym <code>async</code> naprawdę na coś czeka.</p>
+  <p class="meta">Wymaga: <a href="0002-di-lifetimes.html">lekcji 0002</a> (lifetimes), <a href="0005-command-query-handlery.html">0005</a> (handlery), <a href="0007-bledy-problemdetails.html">0007</a> (<code>DomainException</code>). Ściągi: <a href="../reference/ef-core-migrations.html">EF Core + migracje</a>, <a href="../reference/curl-bash.html">curl</a>.</p>
+</header>
+
+<div class="callout">
+  <strong>Jak czytać tę lekcję.</strong> Kod C# jest już w repo — przeczytasz go i zrozumiesz. <strong>Migracji nie ma</strong> i aplikacja bez niej nie wystartuje poprawnie. To twoja część: dwie komendy z kroku 4 i sprawdzenie, co po nich powstało.
+</div>
+
+<h2>Dlaczego to jest ważna lekcja</h2>
+<p>Do tej pory zgłoszenia żyły w <code>List&lt;Ticket&gt;</code> wewnątrz singletona. Wyłączasz aplikację — dane znikają. To wystarczało, żeby uczyć się DI i CQRS, ale ma trzy konsekwencje, które teraz naprawiamy:</p>
+<table>
+  <thead><tr><th>In-memory (0003–0008)</th><th>Baza (0009)</th></tr></thead>
+  <tbody>
+    <tr><td>dane w RAM, giną przy restarcie</td><td>dane w pliku <code>helpdesk.db</code>, przeżywają restart</td></tr>
+    <tr><td>ręczny <code>lock</code>, bo singleton dzielony między wątkami</td><td>brak <code>lock</code> — jeden <code>DbContext</code> na żądanie</td></tr>
+    <tr><td><code>Task.FromResult(...)</code> — <code>async</code> na niby</td><td><code>await</code> na prawdziwym I/O</td></tr>
+  </tbody>
+</table>
+<div class="callout analogy">
+  <strong>Analogia z frontendu.</strong> <code>InMemoryTicketStore</code> to był Pinia store — stan w pamięci karty przeglądarki. EF Core to Prisma albo Drizzle: opisujesz model w kodzie, generator produkuje migracje SQL, a ty piszesz zapytania w języku hosta zamiast w stringach. Nawet komendy się rymują: <code>prisma migrate dev</code> ≈ <code>dotnet ef migrations add</code> + <code>database update</code>.
+</div>
+
+<h2>Krok 0 — sprawdź narzędzie</h2>
+<p>Migracje generuje osobny program CLI, instalowany globalnie, nie pakietem projektu:</p>
+<pre><code>dotnet ef --version
+dotnet tool update --global dotnet-ef</code></pre>
+<p>Jeśli narzędzie jest starsze niż biblioteka, zobaczysz przy każdej komendzie ostrzeżenie — <em>ostrzeżenie</em>, nie błąd, wszystko zadziała:</p>
+<pre><code>The Entity Framework tools version '10.0.7' is older than that of the runtime '10.0.11'.
+Update the tools for the latest features and bug fixes.</code></pre>
+
+<h2>Krok 1 — pakiety i connection string</h2>
+<pre><code>dotnet add package Microsoft.EntityFrameworkCore.Sqlite
+dotnet add package Microsoft.EntityFrameworkCore.Design</code></pre>
+<p><strong>Sqlite</strong> to <em>provider</em> — kawałek EF-a, który wie, jak zamienić LINQ na SQL akurat tego dialektu. W pracy w tym miejscu będzie <code>.SqlServer</code> albo <code>Npgsql.EntityFrameworkCore.PostgreSQL</code>; reszta kodu z tej lekcji zostaje bez zmian. <strong>Design</strong> jest potrzebny tylko do generowania migracji, dlatego NuGet dopisał mu <code>PrivateAssets="all"</code> — nie pojedzie na produkcję.</p>
+
+<p class="filename">appsettings.json</p>
+<pre><code>"ConnectionStrings": {
+  "Helpdesk": "Data Source=helpdesk.db"
+}</code></pre>
+<p>Cały connection string SQLite to ścieżka do pliku. W firmie będzie tam host, baza, użytkownik i hasło — i dlatego <em>nie</em> będzie w <code>appsettings.json</code>, tylko w zmiennych środowiskowych albo user secrets.</p>
+
+<h2>Krok 2 — <code>Ticket</code> przestaje być <code>record</code>-em</h2>
+<p class="filename">Features/Tickets/Ticket.cs — przed i po</p>
+<pre><code>public record Ticket(int Id, string Title, string Priority);
+
+public class Ticket
+{
+    private Ticket(string title, string priority)
+    {
+        Title = title;
+        Priority = priority;
+    }
+
+    public int Id { get; private set; }
+    public string Title { get; private set; }
+    public string Priority { get; private set; }
+
+    public static Ticket Create(string title, string priority) =&gt; new(title, priority);
+
+    public void Rename(string title) =&gt; Title = title;
+
+    public void ChangePriority(string priority) =&gt; Priority = priority;
+}</code></pre>
+<p>Zmieniły się dwie niezależne rzeczy. Pierwsza jest wymuszona przez EF, druga to <strong>styl twojego zespołu</strong> — i dobrze, żeby kod kursu wyglądał jak kod, który czytasz w pracy.</p>
+
+<h3>Dlaczego <code>class</code>, a nie <code>record</code> — wymóg EF</h3>
+<p>EF Core działa na <strong>change trackingu</strong>: wczytuje wiersz, zapamiętuje jego wartości, a przy <code>SaveChangesAsync</code> porównuje i wysyła <code>UPDATE</code> tylko dla zmienionych kolumn. Żeby to miało sens, EF musi <em>zobaczyć</em> zmianę na tym samym obiekcie:</p>
+<pre><code>ticket.Rename(command.Title);
+await db.SaveChangesAsync(cancellationToken);</code></pre>
+<p>Z niemutowalnym <code>record</code>-em pisałbyś <code>ticket with { Title = ... }</code>, co tworzy <strong>nowy obiekt</strong> — a EF nadal śledzi stary i nie ma o czym pisać <code>UPDATE</code>-a. Stąd reguła:</p>
+<div class="callout">
+  <strong>Encja to <code>class</code>. DTO i command to <code>record</code>.</strong> <code>TicketDto</code> i <code>CreateTicketCommand</code> zostały bez zmian — to dobrze. Encja mówi „jak to leży w bazie”, DTO mówi „co widzi frontend”. Rozdzielone, bo dodanie kolumny <code>InternalNotes</code> nie ma prawa wyciec do JSON-a, a zmiana kontraktu API nie ma prawa wymagać migracji.
+</div>
+
+<h3>Dlaczego prywatny konstruktor i <code>Create()</code> — decyzja projektowa</h3>
+<p>Konstruktor jest prywatny, settery są prywatne, więc <strong>spoza klasy nie da się utworzyć ani zmienić zgłoszenia inaczej niż przez metodę o konkretnej nazwie</strong>. Te dwie linie się już nie kompilują:</p>
+<pre><code>var t = new Ticket { Title = "x" };   // niedostępny konstruktor
+ticket.Title = "cokolwiek";           // niedostępny setter</code></pre>
+<p>Co to kupuje: <code>Create()</code> jest jedynym wejściem, więc gdy pojawi się reguła „nowe zgłoszenie zawsze startuje ze statusem <code>open</code>”, jest dokładnie jedno miejsce, gdzie ją dopisać — i żadnego sposobu, żeby ją ominąć. Tak samo <code>Rename()</code>: jeśli kiedyś tytułu nie będzie wolno zmieniać w zamkniętym zgłoszeniu, <code>if</code> ląduje w metodzie, a nie w każdym handlerze, który akurat coś zapisuje.</p>
+<p>Dziś <code>Create()</code> nic nie sprawdza i wygląda na ceremonię. To normalne — sens tego układu widać dopiero przy przejściach statusów (<code>Close()</code>, <code>Assign()</code>), do których dojdziemy. Ważne jest, że <em>miejsce</em> na regułę już istnieje.</p>
+<div class="callout analogy">
+  <strong>To jest ten sam ruch co z <code>ITicketStore</code>.</strong> Zwężasz to, co da się wywołać, żeby nie dało się wywołać czegoś złego. Interfejs ukrywa bazę przed handlerem; prywatny setter ukrywa pole przed wszystkim poza encją.
+</div>
+
+<h3>Dwa haczyki, na które trafisz</h3>
+<p><strong>1. Nazwy parametrów konstruktora muszą się zgadzać z nazwami właściwości.</strong> EF materializuje encję refleksją — modyfikatory dostępu go nie obowiązują, ale wiązanie parametrów idzie po nazwie, nie po pozycji. Przemianuj <code>title</code> na <code>ticketTitle</code>, a projekt zbuduje się z zerem ostrzeżeń, aplikacja wstanie, i dopiero pierwszy <code>GET</code> da 500:</p>
+<pre><code>System.InvalidOperationException: No suitable constructor was found for the type 'Ticket'.
+The following constructors had parameters that could not be bound to properties of the type:
+    Cannot bind 'ticketTitle' in 'Ticket(string ticketTitle, string priority)'</code></pre>
+<p>Jeśli chcesz mieć wolne nazwy parametrów, dołóż <strong>prywatny bezparametrowy</strong> konstruktor — EF użyje jego i wypełni właściwości setterami.</p>
+<p><strong>2. <code>HasData</code> przestaje przyjmować encję</strong>, bo <code>new Ticket { Id = 1, ... }</code> już się nie skompiluje. Idzie tam typ anonimowy — to rozwiązanie z dokumentacji, nie obejście, bo seed i tak trafia do migracji jako <code>InsertData</code>, a nie jako tworzenie obiektu:</p>
+<pre><code>ticket.HasData(
+    new { Id = 1, Title = "Pierwsze zgłoszenie", Priority = "normal" },
+    new { Id = 2, Title = "Drugie zgłoszenie!", Priority = "high" });</code></pre>
+
+<h2>Krok 3 — <code>DbContext</code> i konfiguracja per encja</h2>
+<p><code>DbContext</code> jest celowo chudy — nie wie nic o kolumnach ani o kluczach:</p>
+<p class="filename">Common/Persistence/HelpdeskDbContext.cs</p>
+<pre><code>public class HelpdeskDbContext(DbContextOptions&lt;HelpdeskDbContext&gt; options) : DbContext(options)
+{
+    public DbSet&lt;Ticket&gt; Tickets =&gt; Set&lt;Ticket&gt;();
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder) =&gt;
+        modelBuilder.ApplyConfigurationsFromAssembly(typeof(HelpdeskDbContext).Assembly);
+}</code></pre>
+<p>Cały opis tabeli mieszka <strong>obok encji</strong>, w osobnej klasie implementującej <code>IEntityTypeConfiguration&lt;T&gt;</code>:</p>
+<p class="filename">Features/Tickets/TicketConfiguration.cs</p>
+<pre><code>public class TicketConfiguration : IEntityTypeConfiguration&lt;Ticket&gt;
+{
+    public void Configure(EntityTypeBuilder&lt;Ticket&gt; builder)
+    {
+        builder.HasKey(t =&gt; t.Id);
+        builder.Property(t =&gt; t.Title).IsRequired().HasMaxLength(100);
+        builder.Property(t =&gt; t.Priority).IsRequired().HasMaxLength(20);
+
+        builder.HasData(
+            new { Id = 1, Title = "Pierwsze zgłoszenie", Priority = "normal" },
+            new { Id = 2, Title = "Drugie zgłoszenie!", Priority = "high" });
+    }
+}</code></pre>
+<p>Trzy rzeczy warte nazwania:</p>
+<ul>
+  <li><code>DbSet&lt;Ticket&gt; Tickets</code> — tabela. <code>db.Tickets.Where(...)</code> to nie filtrowanie listy, tylko budowanie <code>SELECT</code>-a.</li>
+  <li><code>Configure</code> — miejsce, gdzie dopowiadasz to, czego EF nie wywnioskuje z samych typów: klucz, wymagalność, długość kolumny, indeksy, relacje.</li>
+  <li><code>HasData</code> — dane startowe (<em>seed</em>) wpisane <strong>do migracji</strong>, nie do kodu startowego. Zaraz zobaczysz je jako <code>INSERT</code> w wygenerowanym pliku.</li>
+</ul>
+
+<h3>Dlaczego osobna klasa, a nie wszystko w <code>OnModelCreating</code></h3>
+<p>Da się wpisać to samo wprost w <code>OnModelCreating</code> — dla jednej encji różnicy nie widać. Widać przy dziesiątej: <code>OnModelCreating</code> puchnie do kilkuset linii, w których każdy feature grzebie przy każdym merge'u. <code>IEntityTypeConfiguration&lt;T&gt;</code> to po prostu <em>jedna encja = jeden plik</em>, a <code>ApplyConfigurationsFromAssembly</code> skanuje assembly refleksją i podpina wszystkie znalezione.</p>
+<div class="callout analogy">
+  <strong>Znasz to już z tego kursu.</strong> To dokładnie ten sam ruch, co <code>AddValidatorsFromAssemblyContaining&lt;Program&gt;()</code> w <a href="0008-fluentvalidation-pipeline.html">lekcji 0008</a> i co metody rozszerzające <code>AddTickets()</code> / <code>MapTickets()</code> z <a href="0004-vertical-slices.html">lekcji 0004</a>: jeden plik na feature, jedna linia skanująca w centrum. Konwencja zamiast rejestru, który trzeba pamiętać.
+</div>
+<p>Gdzie ten plik położyć — to pytanie o architekturę, nie o EF:</p>
+<table>
+  <thead><tr><th>Umiejscowienie</th><th>Kiedy</th></tr></thead>
+  <tbody>
+    <tr><td><code>Features/Tickets/TicketConfiguration.cs</code> (u nas)</td><td>vertical slices — slice trzyma wszystko swoje razem: encję, konfigurację, handlery, walidatory</td></tr>
+    <tr><td><code>Infrastructure/Persistence/Configurations/</code></td><td>Clean Architecture — warstwa domeny nie ma prawa znać EF-a, więc <code>IEntityTypeConfiguration</code> nie może leżeć obok encji</td></tr>
+  </tbody>
+</table>
+<p><code>ApplyConfigurationsFromAssembly</code> znajdzie ją tak czy inaczej — byle była w skanowanym assembly. Wracamy do tego w lekcji 0010.</p>
+
+<h3>Co jeszcze wchodzi do <code>Configure</code>: relacje</h3>
+<p>Nasz <code>Ticket</code> nie ma jeszcze relacji, ale w firmowym kodzie zobaczysz je głównie tutaj i warto umieć to przeczytać:</p>
+<pre><code>builder
+    .HasOne(t =&gt; t.Manufacturer)
+    .WithMany()
+    .HasForeignKey(t =&gt; t.ManufacturerId)
+    .OnDelete(DeleteBehavior.Cascade);</code></pre>
+<table>
+  <thead><tr><th>Fragment</th><th>Znaczenie</th></tr></thead>
+  <tbody>
+    <tr><td><code>HasOne(t =&gt; t.Manufacturer)</code></td><td>ta encja ma jednego producenta</td></tr>
+    <tr><td><code>WithMany()</code></td><td>producent ma wiele takich encji, ale kolekcji po jego stronie nie modelujemy</td></tr>
+    <tr><td><code>HasForeignKey(t =&gt; t.ManufacturerId)</code></td><td>która kolumna trzyma klucz obcy</td></tr>
+    <tr><td><code>OnDelete(DeleteBehavior.Cascade)</code></td><td>skasowanie producenta kasuje wszystkie jego wiersze</td></tr>
+  </tbody>
+</table>
+<div class="callout warn">
+  <strong><code>Cascade</code> to decyzja, nie domyślność.</strong> Przy wymaganym kluczu obcym EF faktycznie przyjmuje <code>Cascade</code> jako domyślne, ale to znaczy, że jedno <code>DELETE</code> może po cichu zabrać ze sobą pół tabeli. Alternatywy: <code>Restrict</code> (zablokuj kasowanie, dopóki są dzieci) i <code>SetNull</code> (osieroć je). Przy encjach, które mają wartość historyczną — zgłoszenia, faktury, logi — <code>Restrict</code> jest zwykle tym, czego chcesz.
+</div>
+<div class="callout warn">
+  <strong>Uwaga na <code>HasIndex(x =&gt; x.Id)</code>.</strong> Jeśli <code>Id</code> jest kluczem głównym, ma już unikalny indeks (<code>PK_Tickets</code>). Dopisanie <code>HasIndex</code> na tej samej kolumnie tworzy <strong>drugi</strong>, tym razem nieunikalny — sprawdziłem, migracja generuje wtedy dodatkowe <code>CreateIndex(name: "IX_Tickets_Id", …)</code>. Kosztuje przy każdym zapisie i nie daje nic. <code>HasIndex</code> jest dla kolumn, po których <em>szukasz</em>: <code>Title</code>, <code>Status</code>, <code>ManufacturerId</code>.
+</div>
+
+<p class="filename">Common/Persistence/PersistenceServices.cs</p>
+<pre><code>services.AddDbContext&lt;HelpdeskDbContext&gt;(options =&gt;
+    options.UseSqlite(configuration.GetConnectionString("Helpdesk")));</code></pre>
+<p>W <code>Program.cs</code> ta linia idzie <em>przed</em> <code>AddTickets()</code> — kolejność rejestracji nie ma znaczenia dla kontenera, ale ma dla czytelnika: infrastruktura, potem feature'y.</p>
+<p><code>HasMaxLength(100)</code> celowo powtarza limit z <code>CreateTicketValidator</code> z <a href="0008-fluentvalidation-pipeline.html">lekcji 0008</a>. To nie duplikat przez niedopatrzenie: walidator zwraca ładne 400 z komunikatem po polsku, kolumna to ostatnia linia obrony przed czymkolwiek, co ominie API.</p>
+
+<h2>Krok 4 — twoja część: pierwsza migracja</h2>
+<p>Z katalogu <code>project/Helpdesk</code>:</p>
+<pre><code>dotnet ef migrations add InitialCreate
+dotnet ef database update</code></pre>
+<p>Pierwsza komenda <strong>nie dotyka bazy</strong>. Porównuje twój model z zapisaną migawką (na razie pustą) i pisze kod różnicy. Powstają trzy pliki:</p>
+<table>
+  <thead><tr><th>Plik</th><th>Co w nim jest</th></tr></thead>
+  <tbody>
+    <tr><td><code>Migrations/2026…_InitialCreate.cs</code></td><td><code>Up()</code> — zmiana w przód, <code>Down()</code> — jej wycofanie</td></tr>
+    <tr><td><code>…_InitialCreate.Designer.cs</code></td><td>migawka modelu na moment tej migracji</td></tr>
+    <tr><td><code>HelpdeskDbContextModelSnapshot.cs</code></td><td>migawka <em>aktualnego</em> modelu — punkt odniesienia dla następnej migracji</td></tr>
+  </tbody>
+</table>
+<p class="filename">Otwórz pierwszy z nich — to zwykły C#, nie magia</p>
+<pre><code>migrationBuilder.CreateTable(
+    name: "Tickets",
+    columns: table =&gt; new
+    {
+        Id = table.Column&lt;int&gt;(type: "INTEGER", nullable: false)
+            .Annotation("Sqlite:Autoincrement", true),
+        Title = table.Column&lt;string&gt;(type: "TEXT", maxLength: 100, nullable: false),
+        Priority = table.Column&lt;string&gt;(type: "TEXT", maxLength: 20, nullable: false)
+    },
+    constraints: table =&gt; { table.PrimaryKey("PK_Tickets", x =&gt; x.Id); });
+
+migrationBuilder.InsertData(
+    table: "Tickets",
+    columns: new[] { "Id", "Priority", "Title" },
+    values: new object[,]
+    {
+        { 1, "normal", "Pierwsze zgłoszenie" },
+        { 2, "high", "Drugie zgłoszenie!" }
+    });</code></pre>
+<p>Widać wszystko, co ustawiłeś w <code>TicketConfiguration</code>: <code>maxLength: 100</code>, <code>nullable: false</code>, klucz główny, seed. I jedną rzecz, której nie ustawiałeś: <code>Sqlite:Autoincrement</code>. <strong>Id generuje teraz baza</strong> — twój <code>GenerateId()</code> z <a href="0003-crud-typedresults.html">lekcji 0003</a> zniknął razem z problemem recyklingu numerów po skasowaniu ostatniego zgłoszenia.</p>
+<p>Dopiero <code>dotnet ef database update</code> wykonuje ten kod na bazie. Powstaje plik <code>helpdesk.db</code> i tabela <code>__EFMigrationsHistory</code> z jednym wierszem — to po niej EF poznaje, których migracji jeszcze nie zaaplikował.</p>
+<div class="callout warn">
+  <strong>Migracje idą do gita, plik <code>.db</code> nie.</strong> Migracje to historia schematu — bez nich kolega po <code>git clone</code> nie odtworzy bazy. Plik <code>.db</code> jest binarny i konfliktuje przy każdym merge'u; dopisałem <code>*.db</code> do <code>project/.gitignore</code>.
+</div>
+
+<h2>Krok 5 — <code>EfTicketStore</code> i pierwszy prawdziwy <code>await</code></h2>
+<p>Interfejs zmienił kształt: każda metoda jest teraz asynchroniczna i przyjmuje <code>CancellationToken</code>.</p>
+<p class="filename">Features/Tickets/ITicketStore.cs</p>
+<pre><code>Task&lt;IReadOnlyList&lt;Ticket&gt;&gt; GetAllAsync(CancellationToken cancellationToken = default);
+Task&lt;Ticket?&gt;             GetByIdAsync(int id, CancellationToken cancellationToken = default);
+Task&lt;bool&gt;                TitleExistsAsync(string title, CancellationToken cancellationToken = default);
+Task&lt;Ticket&gt;              AddAsync(string title, string priority, CancellationToken cancellationToken = default);
+Task&lt;bool&gt;                UpdateAsync(int id, string title, string priority, CancellationToken cancellationToken = default);
+Task&lt;bool&gt;                DeleteAsync(int id, CancellationToken cancellationToken = default);</code></pre>
+<p>To jest ta zmiana, na którą czekaliśmy od lekcji 0005. Wtedy handlery zwracały <code>Task.FromResult(...)</code> — deklarowały asynchroniczność, ale nic nie czekało. Teraz:</p>
+<p class="filename">Features/Tickets/Queries/ListTickets/ListTicketsHandler.cs</p>
+<pre><code>public async Task&lt;IReadOnlyList&lt;TicketDto&gt;&gt; HandleAsync(ListTicketsQuery query, CancellationToken cancellationToken = default)
+{
+    var tickets = await store.GetAllAsync(cancellationToken);
+
+    return [.. tickets.Select(TicketDto.From)];
+}</code></pre>
+<p>Wątek, który obsługiwał to żądanie, na czas zapytania do bazy <strong>wraca do puli</strong> i obsługuje inne żądania. Przy jednym pliku SQLite to niewidoczne; przy bazie po sieci to różnica między setką a tysiącami równoczesnych żądań na tej samej maszynie. <code>CancellationToken</code> jedzie aż do sterownika: klient zamyka kartę, żądanie jest anulowane, zapytanie przestaje mielić bazę.</p>
+
+<p class="filename">Features/Tickets/EfTicketStore.cs — odczyt</p>
+<pre><code>public async Task&lt;IReadOnlyList&lt;Ticket&gt;&gt; GetAllAsync(CancellationToken cancellationToken = default) =&gt;
+    await db.Tickets.AsNoTracking().OrderBy(t =&gt; t.Id).ToListAsync(cancellationToken);
+
+public Task&lt;bool&gt; TitleExistsAsync(string title, CancellationToken cancellationToken = default) =&gt;
+    db.Tickets.AnyAsync(t =&gt; t.Title == title, cancellationToken);</code></pre>
+<p class="filename">EfTicketStore.cs — zapis</p>
+<pre><code>public async Task&lt;bool&gt; UpdateAsync(int id, string title, string priority, CancellationToken cancellationToken = default)
+{
+    var ticket = await db.Tickets.FirstOrDefaultAsync(t =&gt; t.Id == id, cancellationToken);
+    if (ticket is null)
+    {
+        return false;
+    }
+
+    ticket.Rename(title);
+    ticket.ChangePriority(priority);
+    await db.SaveChangesAsync(cancellationToken);
+
+    return true;
+}</code></pre>
+<p>Zwróć uwagę: <strong>nie ma tu żadnego <code>db.Tickets.Update(...)</code></strong>. Wywołanie <code>Rename()</code> zmienia właściwość i to wystarczy, bo encja jest śledzona — wczytana <em>bez</em> <code>AsNoTracking()</code>. Stąd reguła kciuka:</p>
+<div class="callout">
+  <strong>Query → <code>AsNoTracking()</code>. Command → bez.</strong> Tracking to kopia każdego wczytanego wiersza trzymana w pamięci po to, żeby wykryć zmiany. Przy <code>GET</code>, gdzie nic nie zapisujesz, to czysty koszt. Przy <code>PUT</code> to cały mechanizm.
+</div>
+
+<h3>Ten sam kod widziany od strony bazy</h3>
+<p>Uruchom API z <code>ASPNETCORE_ENVIRONMENT=Development</code> i patrz na konsolę — EF loguje każde zapytanie. Poniżej realny log z tej sesji:</p>
+<pre><code>SELECT "t"."Id", "t"."Priority", "t"."Title"
+FROM "Tickets" AS "t"
+ORDER BY "t"."Id"
+
+SELECT EXISTS (
+    SELECT 1
+    FROM "Tickets" AS "t"
+    WHERE "t"."Title" = @title)
+
+INSERT INTO "Tickets" ("Priority", "Title")
+VALUES (@p0, @p1)
+RETURNING "Id";
+
+UPDATE "Tickets" SET "Priority" = @p0, "Title" = @p1
+WHERE "Id" = @p2
+RETURNING 1;</code></pre>
+<p>Dwie obserwacje na przyszłość. Po pierwsze, wartości lecą jako <strong>parametry</strong> (<code>@p0</code>), nie sklejone w string — SQL injection nie ma tędy drogi. Po drugie, <code>AnyAsync</code> nie ściąga wierszy, tylko pyta <code>SELECT EXISTS</code>. Gdybyś napisał <code>store.GetAllAsync()</code> i potem <code>.Any(...)</code> w C#, ściągnąłbyś całą tabelę, żeby sprawdzić jeden warunek. To jest ta klasa błędów, która na dev-ie nie boli, a na produkcji kładzie serwis.</p>
+
+<h2>Krok 6 — lifetime, czyli powrót lekcji 0002</h2>
+<p>W <code>TicketsFeature</code> zmieniła się jedna linia:</p>
+<pre><code>services.AddSingleton&lt;ITicketStore, InMemoryTicketStore&gt;();
+services.AddScoped&lt;ITicketStore, EfTicketStore&gt;();</code></pre>
+<p><code>AddDbContext</code> rejestruje <code>HelpdeskDbContext</code> jako <strong>Scoped</strong>, bo <code>DbContext</code> nie jest thread-safe i nie ma być długowieczny. Cokolwiek go wstrzykuje, musi mieć lifetime nie dłuższy. Zostaw <code>AddSingleton</code>, a aplikacja nie wstanie:</p>
+<pre><code>Cannot consume scoped service 'Helpdesk.Common.Persistence.HelpdeskDbContext'
+from singleton 'Helpdesk.Features.Tickets.ITicketStore'.</code></pre>
+<p>To dokładnie ta sama <em>captive dependency</em>, którą wywoływaliśmy celowo w <a href="0002-di-lifetimes.html">lekcji 0002</a> — tym razem nie na sztucznym przykładzie, tylko na czymś, co naprawdę byś napisał.</p>
+<p>I konsekwencja, która wygląda jak usunięcie kodu: <strong>zniknął <code>lock</code></strong> z lekcji 0003. Nie dlatego, że przestał być potrzebny — dlatego, że problem przestał istnieć. Singleton był jeden dla wszystkich wątków, więc trzeba było ręcznie pilnować listy. Scope to jedno żądanie HTTP, więc każde żądanie dostaje własny <code>DbContext</code> i nikt niczego nie współdzieli. O równoczesne zapisy dba baza — transakcjami, nie <code>lock</code>-iem w C#.</p>
+
+<h2>Krok 7 — reguła, której walidator nie sprawdzi</h2>
+<p>Obiecana na końcu lekcji 0008: <strong>unikalność tytułu</strong>. Walidator dostaje wyłącznie treść żądania, a na pytanie „czy taki tytuł już jest?” nie da się odpowiedzieć bez zajrzenia do bazy. To reguła domenowa, więc trafia do handlera i leci przez <code>DomainException</code> z <a href="0007-bledy-problemdetails.html">lekcji 0007</a>:</p>
+<p class="filename">Features/Tickets/Commands/CreateTicket/CreateTicketHandler.cs</p>
+<pre><code>public async Task&lt;TicketDto&gt; HandleAsync(CreateTicketCommand command, CancellationToken cancellationToken = default)
+{
+    if (await store.TitleExistsAsync(command.Title, cancellationToken))
+    {
+        throw new DomainException(TicketErrors.DuplicateTitle(command.Title));
+    }
+
+    var ticket = await store.AddAsync(command.Title, command.Priority, cancellationToken);
+    metrics.RecordCreated(user);
+
+    return TicketDto.From(ticket);
+}</code></pre>
+<p class="filename">Features/Tickets/TicketErrors.cs</p>
+<pre><code>public static Error DuplicateTitle(string title) =&gt;
+    new("ticket.duplicate_title", $"Zgłoszenie o tytule „{title}” już istnieje.", ErrorType.Conflict);</code></pre>
+<p><code>ErrorType.Conflict</code> mapuje się na <strong>409</strong> — to twoja własna decyzja ze <code>StatusFor</code> w <code>DomainExceptionHandler</code>, podjęta w lekcji 0007, kiedy jeszcze nic nie zwracało konfliktu. Teraz coś zwraca.</p>
+
+<h2><code>throw</code> w implementacji czy w miejscu użycia?</h2>
+<p><code>GetByIdAsync</code> zwraca <code>Ticket?</code>, a wyjątek leci dopiero w handlerze:</p>
+<pre><code>public Task&lt;Ticket?&gt; GetByIdAsync(int id, CancellationToken ct = default) =&gt;
+    db.Tickets.AsNoTracking().FirstOrDefaultAsync(t =&gt; t.Id == id, ct);
+
+var ticket = await store.GetByIdAsync(query.Id, cancellationToken)
+    ?? throw new DomainException(TicketErrors.NotFound(query.Id));</code></pre>
+<p>Reguła: <strong><code>throw</code> idzie tam, gdzie zna się <em>znaczenie</em> braku.</strong> Store wie tylko, że wiersza nie ma. Czy to błąd, zależy od tego, kto pyta:</p>
+<table>
+  <thead><tr><th>Kto pyta</th><th>Brak znaczy</th><th>Odpowiedź</th></tr></thead>
+  <tbody>
+    <tr><td><code>GET /tickets/99</code></td><td>błąd klienta</td><td>404</td></tr>
+    <tr><td><code>POST</code> sprawdzający duplikat tytułu</td><td>wszystko w porządku</td><td>201</td></tr>
+    <tr><td>import z pliku</td><td>pominąć wiersz i lecieć dalej</td><td>wpis w logu</td></tr>
+  </tbody>
+</table>
+<p>Gdyby <code>GetByIdAsync</code> rzucało samo, dwa ostatnie przypadki musiałyby <em>łapać wyjątek, żeby stwierdzić normalną sytuację</em>. Drugi powód, ważniejszy przy większym repo: store zaczyna wtedy zależeć od katalogu błędów feature'u. Jeden store używany przez trzy feature'y narzucałby wszystkim ten sam komunikat i ten sam status.</p>
+<p>Ale to nie znaczy „nigdy nie rzucaj w implementacji”. Rozstrzyga <strong>nazwa metody</strong> — dokładnie tak robi sam EF Core:</p>
+<table>
+  <thead><tr><th>Zwraca <code>null</code></th><th>Rzuca wyjątek</th></tr></thead>
+  <tbody>
+    <tr><td><code>FirstOrDefaultAsync</code></td><td><code>FirstAsync</code></td></tr>
+    <tr><td><code>SingleOrDefaultAsync</code></td><td><code>SingleAsync</code></td></tr>
+  </tbody>
+</table>
+<p>Jeśli <code>?? throw</code> powtórzy ci się w czterech handlerach, nie przenoś go do <code>GetByIdAsync</code> — dołóż drugą metodę obok, której nazwa i typ zwracany obiecują co innego:</p>
+<pre><code>Task&lt;Ticket?&gt; GetByIdAsync(int id, CancellationToken ct = default);
+Task&lt;Ticket&gt;  GetRequiredAsync(int id, CancellationToken ct = default);</code></pre>
+<p><code>Ticket?</code> zmusza wołającego do decyzji, <code>Ticket</code> obiecuje, że decyzja już zapadła. Przy jednym użyciu <code>?? throw</code> w handlerze jest tańsze — dlatego u nas jest tak, jak jest.</p>
+<div class="callout warn">
+  <strong>Czego nie robić:</strong> store rzuca <code>KeyNotFoundException</code>, handler łapie i zamienia na <code>DomainException</code>. To <code>try/catch</code> w roli <code>if</code>-a, przez granicę, którą sam kontrolujesz — droższe i gubiące kontekst.
+</div>
+<p>Ta sama zasada, tylko wyrażona inaczej, siedzi w <code>UpdateAsync</code> i <code>DeleteAsync</code>: zwracają <code>bool</code>, a <code>throw</code> jest w handlerze.</p>
+
+<h2>Sprawdź, że działa</h2>
+<pre><code>cd project/Helpdesk
+dotnet ef database update
+dotnet run</code></pre>
+<table>
+  <thead><tr><th>Żądanie</th><th>Status</th><th>Ciało</th></tr></thead>
+  <tbody>
+    <tr><td><code>GET /tickets</code></td><td>200</td><td>dwa zgłoszenia z <code>HasData</code></td></tr>
+    <tr><td><code>POST /tickets</code> <code>{"title":"Drukarka nie drukuje","priority":"high"}</code></td><td>201</td><td><code>{"id":3,…}</code> — Id nadała baza</td></tr>
+    <tr><td>ten sam POST drugi raz</td><td><strong>409</strong></td><td><code>code: ticket.duplicate_title</code></td></tr>
+    <tr><td><code>POST</code> <code>{"title":"","priority":"urgent"}</code></td><td>400</td><td><code>validation_failed</code>, słownik <code>errors</code> — walidator działa jak działał</td></tr>
+    <tr><td><code>PUT /tickets/1</code> z poprawnym ciałem</td><td>204</td><td>puste</td></tr>
+    <tr><td><code>GET /tickets/99</code></td><td>404</td><td><code>code: ticket.not_found</code></td></tr>
+    <tr><td><code>DELETE /tickets/2</code>, potem drugi raz</td><td>204, potem 404</td><td>—</td></tr>
+    <tr><td><code>GET /tickets/metrics</code></td><td>200</td><td>licznik z pamięci, nie z bazy</td></tr>
+  </tbody>
+</table>
+<p class="filename">Komendy do skopiowania (Git Bash)</p>
+<pre><code>curl -s http://localhost:5006/tickets
+
+curl -s -w "\n=&gt; %{http_code}\n" -X POST http://localhost:5006/tickets \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Drukarka nie drukuje","priority":"high"}'
+
+curl -s -w "\n=&gt; %{http_code}\n" -X PUT http://localhost:5006/tickets/1 \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Poprawiony tytul","priority":"low"}'
+
+curl -s -w "=&gt; %{http_code}\n" -X DELETE http://localhost:5006/tickets/2</code></pre>
+
+<h3>Moment, dla którego robimy tę lekcję</h3>
+<p>Zatrzymaj aplikację (<kbd>Ctrl+C</kbd>) i uruchom ją ponownie. Potem:</p>
+<pre><code>curl -s http://localhost:5006/tickets
+[{"id":1,"title":"Poprawiony tytul","priority":"low"},{"id":3,"title":"Drukarka nie drukuje","priority":"high"}]
+
+curl -s http://localhost:5006/tickets/metrics
+{"created":0}</code></pre>
+<p>Zgłoszenia przeżyły restart. Licznik z <code>TicketMetrics</code> — nie, bo to nadal Singleton trzymający liczbę w polu klasy. Jeden request, dwie różne trwałości, i to jest cały sens tej lekcji w jednym wydruku.</p>
+
+<h2>Zepsuj celowo (cztery błędy, które i tak zobaczysz w pracy)</h2>
+
+<h3>1. Migracja wygenerowana, ale nie zaaplikowana</h3>
+<pre><code>rm project/Helpdesk/helpdesk.db
+dotnet run
+curl -s -w "\n=&gt; %{http_code}\n" http://localhost:5006/tickets</code></pre>
+<p>Odpowiedź: <strong>500</strong> z generycznym <code>ProblemDetails</code> (bez szczegółów — tak ustawiliśmy to w lekcji 0007). Prawda jest w konsoli:</p>
+<pre><code>fail: Microsoft.EntityFrameworkCore.Query[10100]
+      Microsoft.Data.Sqlite.SqliteException (0x80004005): SQLite Error 1: 'no such table: Tickets'.</code></pre>
+<p>Zajrzyj do katalogu: <code>helpdesk.db</code> <em>istnieje</em> i ma <strong>0 bajtów</strong>. SQLite tworzy plik przy pierwszym połączeniu, ale schematu w nim nie ma. „Plik jest, więc baza jest” to fałszywy trop — źródłem prawdy jest tabela <code>__EFMigrationsHistory</code>. Naprawa: <code>dotnet ef database update</code>.</p>
+
+<h3>2. Store jako Singleton</h3>
+<p>W <code>TicketsFeature</code> zamień <code>AddScoped</code> na <code>AddSingleton</code> i uruchom. Aplikacja nie wstaje — wyjątek leci z <code>builder.Build()</code>, zanim obsłuży pierwsze żądanie:</p>
+<pre><code>System.AggregateException: Some services are not able to be constructed
+(Error while validating the service descriptor 'ServiceType: Helpdesk.Features.Tickets.ITicketStore
+Lifetime: Singleton ImplementationType: Helpdesk.Features.Tickets.EfTicketStore':
+Cannot consume scoped service 'Helpdesk.Common.Persistence.HelpdeskDbContext'
+from singleton 'Helpdesk.Features.Tickets.ITicketStore'.)</code></pre>
+<p>Sześć takich bloków, po jednym na każdy handler w łańcuchu. Przywróć <code>AddScoped</code>.</p>
+
+<h3>3. Pole w encji bez migracji</h3>
+<p>Dopisz do <code>Ticket</code> jedną linię i uruchom, <em>bez</em> generowania migracji:</p>
+<pre><code>public string? AssignedTo { get; private set; }</code></pre>
+<pre><code>SQLite Error 1: 'no such column: t.AssignedTo'</code></pre>
+<p>Kompiluje się, startuje, wywala się przy pierwszym zapytaniu. To najczęstszy błąd początkującego z EF: model w kodzie i schemat w bazie to <strong>dwie osobne rzeczy</strong>, a migracja jest jedynym mostem między nimi. Usuń linię (albo zrób z niej migrację — patrz zadanie).</p>
+
+<h3>4. Zapomniane <code>ApplyConfigurationsFromAssembly</code></h3>
+<p>Usuń tę jedną linię z <code>OnModelCreating</code>, skasuj katalog <code>Migrations</code> i wygeneruj migrację jeszcze raz. Nie ma błędu. Nie ma ostrzeżenia. Jest za to <em>inna</em> tabela:</p>
+<pre><code>Title = table.Column&lt;string&gt;(type: "TEXT", nullable: false),
+Priority = table.Column&lt;string&gt;(type: "TEXT", nullable: false)</code></pre>
+<p>Zniknęło <code>maxLength: 100</code>, zniknął cały <code>InsertData</code> z danymi startowymi. <code>TicketConfiguration</code> nadal istnieje, kompiluje się i nikt go nigdy nie wywołuje. To ta sama klasa cichej awarii co zapomniane <code>AddValidation()</code> z lekcji 0008: konfiguracja przez skanowanie assembly jest wygodna dokładnie do momentu, w którym ktoś usunie linię skanującą.</p>
+<p>Przywróć linię, skasuj <code>Migrations</code> i wygeneruj migrację ponownie — sprawdź, że <code>maxLength: 100</code> wróciło.</p>
+
+<h2>Rozmowa, którą usłyszysz w zespole: repozytorium nad <code>DbContext</code>?</h2>
+<p>Zostawiliśmy <code>ITicketStore</code>, choć <code>DbContext</code> sam w sobie jest już abstrakcją nad bazą, a <code>DbSet&lt;T&gt;</code> to w zasadzie repozytorium. Argumenty z obu stron, bo obie usłyszysz:</p>
+<table>
+  <thead><tr><th>Za własnym interfejsem</th><th>Za <code>DbContext</code> wprost w handlerze</th></tr></thead>
+  <tbody>
+    <tr><td>handler nie wie nic o EF — da się podmienić bazę i testować bez niej</td><td>mniej warstw, mniej plików, mniej ceremonii</td></tr>
+    <tr><td>zapytania w jednym miejscu, nie rozsypane po slice'ach</td><td>slice widzi całe LINQ i może zoptymalizować własne zapytanie</td></tr>
+    <tr><td>wymusza granicę, którą Clean Architecture i tak narzuci</td><td>repozytorium nad ORM-em zwykle degeneruje się do <code>GetByXAndYAndZ</code></td></tr>
+  </tbody>
+</table>
+<p>Szkoła <em>vertical slices</em> (Milan Jovanović, którego zna wasz zespół) częściej wybiera drugą kolumnę: <code>DbContext</code> prosto w handlerze, bo slice ma być samowystarczalny. Szkoła <em>Clean Architecture</em> wybiera pierwszą, bo warstwa domeny nie ma prawa znać EF-a. Wracamy do tego w lekcji 0010 — i to jest pytanie, które warto zadać na code review w pracy, bo odpowiedź mówi więcej o architekturze repo niż nazwy folderów.</p>
+
+<h2>Sprawdź się</h2>
+
+<div class="quiz" data-answer="1">
+  <div class="q">Dlaczego <code>Ticket</code> przestał być <code>record</code>-em?</div>
+  <button class="opt">EF Core nie potrafi zmapować typu <code>record</code> na tabelę w bazie</button>
+  <button class="opt">Change tracking wymaga zmiany pola na tym samym obiekcie</button>
+  <button class="opt">Rekordy nie mogą mieć klucza głównego oznaczonego jako <code>Id</code></button>
+  <div class="why">EF mapuje rekordy bez problemu. Problem jest w zapisie: <code>with { }</code> tworzy nowy obiekt, a śledzony jest stary — <code>SaveChangesAsync</code> nie miałby o czym pisać <code>UPDATE</code>-a.</div>
+</div>
+
+<div class="quiz" data-answer="2">
+  <div class="q">Co robi <code>dotnet ef migrations add</code> z bazą danych?</div>
+  <button class="opt">Tworzy tabele i od razu wpisuje do nich dane startowe z <code>HasData</code></button>
+  <button class="opt">Otwiera połączenie, żeby porównać schemat bazy z modelem w kodzie</button>
+  <button class="opt">Nic — generuje kod z różnicy modelu i zapisanej migawki</button>
+  <div class="why">Migracja powstaje wyłącznie z porównania modelu ze snapshotem, offline. Bazy dotyka dopiero <code>database update</code>. Dlatego migrację można wygenerować bez dostępu do serwera bazy.</div>
+</div>
+
+<div class="quiz" data-answer="0">
+  <div class="q">Kiedy <strong>nie</strong> używać <code>AsNoTracking()</code>?</div>
+  <button class="opt">Gdy wczytujesz encję po to, żeby zmienić jej pola i zapisać</button>
+  <button class="opt">Gdy zapytanie zwraca więcej niż kilkaset wierszy z jednej tabeli</button>
+  <button class="opt">Gdy wynik trafia prosto do DTO i zaraz potem do odpowiedzi</button>
+  <div class="why">Bez trackingu EF nie zauważy przypisania <code>ticket.Title = …</code> i <code>SaveChangesAsync</code> nie wyśle <code>UPDATE</code>-a. Przy odczytach — odwrotnie: tracking to zbędny koszt.</div>
+</div>
+
+<div class="quiz" data-answer="2">
+  <div class="q">Zgłoszenie o tym tytule już istnieje. Walidator czy handler?</div>
+  <button class="opt">Walidator, bo to komunikat pokazywany użytkownikowi pod polem</button>
+  <button class="opt">Walidator, bo tylko on potrafi zwrócić słownik <code>errors</code></button>
+  <button class="opt">Handler, bo odpowiedź wymaga zapytania do bazy danych</button>
+  <div class="why">Walidator widzi wyłącznie treść żądania. Wszystko, co wymaga stanu systemu, jest regułą domenową: <code>DomainException</code>, jeden <code>code</code>, status 409.</div>
+</div>
+
+<div class="quiz" data-answer="1">
+  <div class="q">Czemu z <code>EfTicketStore</code> zniknął <code>lock</code> z lekcji 0003?</div>
+  <button class="opt">Bo EF Core zakłada własną blokadę wewnątrz metody <code>SaveChangesAsync</code></button>
+  <button class="opt">Bo każde żądanie dostaje swój własny, nieudostępniany <code>DbContext</code></button>
+  <button class="opt">Bo SQLite obsługuje tylko jedno połączenie i szereguje zapisy</button>
+  <div class="why"><code>DbContext</code> jest Scoped, a scope to jedno żądanie HTTP — nie ma współdzielonego stanu, więc nie ma czego blokować. O równoczesne zapisy dba baza, transakcjami.</div>
+</div>
+
+<div class="quiz" data-answer="1">
+  <div class="q">Usuwasz <code>ApplyConfigurationsFromAssembly</code>. Co się dzieje?</div>
+  <button class="opt">Aplikacja nie startuje — kontener zgłasza brak konfiguracji encji</button>
+  <button class="opt">Nic nie protestuje, a migracja gubi limity kolumn i seed</button>
+  <button class="opt">Migracja się nie generuje, bo model nie ma klucza głównego</button>
+  <div class="why">EF wywnioskuje z samych typów tyle, ile umie: tabelę, kolumny i <code>Id</code> jako klucz. Wszystko, co dopisałeś w <code>Configure</code> — długości, seed, indeksy, relacje — po prostu nie istnieje. Cicha awaria, jak zapomniane <code>AddValidation()</code>.</div>
+</div>
+
+<div class="quiz" data-answer="0">
+  <div class="q">Gdzie powinien być <code>throw</code> przy braku zgłoszenia?</div>
+  <button class="opt">W handlerze, bo tylko on wie, czy brak jest błędem</button>
+  <button class="opt">W store, bo on pierwszy widzi, że wiersza nie ma</button>
+  <button class="opt">W endpoincie, bo tam powstaje odpowiedź HTTP klienta</button>
+  <div class="why">Store zna fakt, handler zna znaczenie: dla <code>GET /tickets/99</code> brak to 404, przy sprawdzaniu duplikatu to sytuacja normalna. Wyjątek w implementacji jest w porządku tylko wtedy, gdy obiecuje go nazwa — jak <code>FirstAsync</code> obok <code>FirstOrDefaultAsync</code>.</div>
+</div>
+
+<div class="task">
+  <h3>Zadanie</h3>
+  <ol>
+    <li>Wygeneruj i zaaplikuj migrację (<code>migrations add InitialCreate</code>, <code>database update</code>). Otwórz wygenerowany plik i znajdź w nim trzy rzeczy z <code>OnModelCreating</code>.</li>
+    <li>Przejdź całą tabelę weryfikacyjną curlem. Sprawdź, że drugi identyczny POST daje <strong>409</strong>.</li>
+    <li>Zatrzymaj i uruchom aplikację ponownie. Porównaj <code>GET /tickets</code> z <code>GET /tickets/metrics</code>.</li>
+    <li>Przejdź cztery błędy z sekcji „Zepsuj celowo”. Za każdym razem przywróć stan.</li>
+    <li><strong>Druga migracja.</strong> Dopisz w <code>OnModelCreating</code> linię <code>ticket.HasIndex(t =&gt; t.Title).IsUnique();</code>, potem <code>dotnet ef migrations add UniqueTicketTitle</code> i <code>dotnet ef database update</code>. Zobacz, że nowa migracja ma tylko <code>CreateIndex</code> — nie powtarza tabeli.</li>
+    <li>Mając już indeks, zakomentuj sprawdzenie <code>TitleExistsAsync</code> w handlerze i wyślij duplikat. Dostaniesz <strong>500</strong> i w logu <code>SQLite Error 19: 'UNIQUE constraint failed: Tickets.Title'</code>. Odkomentuj. To jest odpowiedź na pytanie „skoro baza pilnuje, po co sprawdzenie w kodzie?”: baza chroni dane, handler produkuje sensowną odpowiedź HTTP.</li>
+    <li><code>git diff project/Helpdesk</code> — zobacz, że <code>TicketDto</code>, endpointy i walidatory nie zmieniły się ani o linijkę.</li>
+  </ol>
+  <div class="check">
+    <label><input type="checkbox" id="c1"> Wygenerowałem migrację i umiem powiedzieć, czym różni się <code>migrations add</code> od <code>database update</code></label>
+    <label><input type="checkbox" id="c2"> Widziałem dane, które przeżyły restart, i licznik, który nie przeżył</label>
+    <label><input type="checkbox" id="c3"> Umiem uzasadnić, czemu encja jest klasą, a DTO rekordem</label>
+    <label><input type="checkbox" id="c4"> Wiem, kiedy <code>AsNoTracking()</code>, a kiedy nie</label>
+    <label><input type="checkbox" id="c5"> Widziałem <code>no such table</code>, <code>no such column</code> i captive dependency na własne oczy</label>
+    <label><input type="checkbox" id="c6"> Zrobiłem drugą migrację i wiem, czemu ma tylko różnicę</label>
+    <label><input type="checkbox" id="c7"> Umiem powiedzieć, co w firmowym repo sprawdzić: <code>DbContext</code> w handlerze czy repozytorium</label>
+    <label><input type="checkbox" id="c8"> Rozumiem, co daje prywatny konstruktor z <code>Create()</code> i jaki błąd daje zła nazwa parametru</label>
+    <label><input type="checkbox" id="c9"> Umiem uzasadnić, czemu <code>throw</code> jest w handlerze, a nie w <code>GetByIdAsync</code></label>
+    <label><input type="checkbox" id="c10"> Wiem, co robi <code>IEntityTypeConfiguration&lt;T&gt;</code> i czemu <code>HasIndex</code> na kluczu głównym to błąd</label>
+  </div>
+</div>
+
+<h2>Zapamiętaj bez zaglądania</h2>
+<details class="recall">
+  <summary>Dwie komendy i co dokładnie robi każda z nich?</summary>
+  <p><code>dotnet ef migrations add Nazwa</code> — porównuje model ze snapshotem i <em>generuje kod</em>; bazy nie dotyka. <code>dotnet ef database update</code> — wykonuje na bazie migracje, których nie ma w tabeli <code>__EFMigrationsHistory</code>. Migracje idą do gita, plik <code>.db</code> nie.</p>
+</details>
+<details class="recall">
+  <summary>Jakiego lifetime'u wymaga <code>DbContext</code> i dlaczego?</summary>
+  <p>Scoped — rejestruje go tak samo <code>AddDbContext</code>. Nie jest thread-safe, więc jeden na żądanie. Wszystko, co go wstrzykuje, musi być Scoped albo Transient; Singleton = <code>Cannot consume scoped service … from singleton …</code> przy <code>Build()</code>.</p>
+</details>
+<details class="recall">
+  <summary>Jak zapisać zmianę w istniejącym wierszu?</summary>
+  <p>Wczytać encję <em>bez</em> <code>AsNoTracking()</code>, przypisać nowe wartości do właściwości, wywołać <code>await db.SaveChangesAsync(ct)</code>. Żadnego <code>.Update(...)</code> — change tracker sam wykryje różnicę i wygeneruje <code>UPDATE</code> tylko dla zmienionych kolumn.</p>
+</details>
+<details class="recall">
+  <summary>Reguła wymaga zajrzenia do bazy — gdzie ją umieścić?</summary>
+  <p>W handlerze, nie w walidatorze. Walidator widzi tylko treść żądania. Reguła domenowa leci przez <code>DomainException</code> z katalogu błędów: <code>ticket.duplicate_title</code>, <code>ErrorType.Conflict</code>, HTTP 409.</p>
+</details>
+
+<details class="recall">
+  <summary>Gdzie opisujesz kolumny, indeksy i relacje — i jak to trafia do <code>DbContext</code>?</summary>
+  <p>W klasie <code>…Configuration : IEntityTypeConfiguration&lt;T&gt;</code>, jedna encja = jeden plik, obok encji (slices) albo w <code>Infrastructure/Persistence/Configurations</code> (Clean Architecture). <code>DbContext</code> podpina wszystkie jedną linią: <code>modelBuilder.ApplyConfigurationsFromAssembly(typeof(HelpdeskDbContext).Assembly)</code>. Bez tej linii konfiguracja jest ignorowana bez żadnego błędu.</p>
+</details>
+<details class="recall">
+  <summary>Prywatny konstruktor i <code>Create()</code> — co na to EF i gdzie jest pułapka?</summary>
+  <p>EF materializuje encję refleksją, więc prywatny konstruktor i prywatne settery mu nie przeszkadzają. Pułapka: parametry konstruktora są wiązane <strong>po nazwie</strong> z właściwościami — niezgodność daje <code>No suitable constructor was found for the type 'Ticket'</code> dopiero w czasie działania. Druga: <code>HasData</code> przyjmuje wtedy typ anonimowy, nie encję.</p>
+</details>
+<details class="recall">
+  <summary>Metoda nie znalazła rekordu — zwrócić <code>null</code> czy rzucić?</summary>
+  <p>Rozstrzyga nazwa. <code>GetByIdAsync</code> → <code>null</code>, a znaczenie braku nadaje wołający (<code>?? throw new DomainException(...)</code> w handlerze). <code>GetRequiredAsync</code> → rzuca, bo tak obiecuje. Wzór: <code>FirstOrDefaultAsync</code> vs <code>FirstAsync</code> w EF Core.</p>
+</details>
+
+<h2>Źródło pierwotne</h2>
+<div class="callout source">
+  <a href="https://learn.microsoft.com/en-us/ef/core/managing-schemas/migrations/?tabs=dotnet-core-cli">Microsoft Learn — Migrations overview</a> (ok. 15 min) jako lektura numer jeden; potem <a href="https://learn.microsoft.com/en-us/ef/core/dbcontext-configuration/">DbContext lifetime, configuration and initialization</a> (to ona jest źródłem reguły „Scoped, jeden na żądanie”) i <a href="https://learn.microsoft.com/en-us/ef/core/querying/tracking">Tracking vs. no-tracking queries</a>.
+</div>
+<div class="callout ask">
+  Pytaj, jeśli coś nie klika. Warto też sprawdzić w firmowym repo: czy handlery biorą <code>DbContext</code> wprost, czy przez interfejs? Gdzie leżą migracje — w projekcie API czy w osobnym <code>Infrastructure</code>? I kto je aplikuje na produkcji: aplikacja przy starcie, czy skrypt z <code>dotnet ef migrations script</code>?
+</div>
+
+<h2>Co dalej</h2>
+<p>Lekcja 0010: <strong>Clean Architecture</strong>. Ten sam Helpdesk rozłożony na warstwy, kierunek zależności, i odpowiedź na pytanie z tabeli wyżej — dlaczego w firmowym repo <code>DbContext</code> siedzi w innym projekcie niż handlery.</p>
+
+<nav class="lesson-nav">
+  <a href="0008-fluentvalidation-pipeline.html">← Lekcja 0008</a>
+  <a href="../reference/ef-core-migrations.html">Ściąga: EF Core + migracje</a>
+  <a href="../reference/di-lifetimes.html">Ściąga: lifetimes</a>
+</nav>
+</div>
+</body>
+</html>

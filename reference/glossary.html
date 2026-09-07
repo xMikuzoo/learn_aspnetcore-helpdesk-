@@ -188,13 +188,46 @@
   <dd>Typ C# do niemutowalnych danych z równością po wartości: <code>record CreateTicketCommand(string Title);</code>. Idealny na command/query/DTO.</dd>
 
   <dt>Entity <span class="pl">— encja</span></dt>
-  <dd>Obiekt z tożsamością (Id) i cyklem życia, np. <code>Ticket</code>. Mapowany na tabelę przez EF Core.</dd>
+  <dd>Obiekt z tożsamością (Id) i cyklem życia, np. <code>Ticket</code>. Mapowany na tabelę przez EF Core. W praktyce <code>class</code> z <code>{ get; set; }</code>, nie <code>record</code> — inaczej change tracking nie zobaczy zmiany. Lekcja <a href="../lessons/0009-ef-core-sqlite.html">0009</a>.</dd>
+
+  <dt>Factory method <span class="pl">— metoda wytwórcza</span></dt>
+  <dd>Statyczna metoda tworząca obiekt zamiast publicznego konstruktora: <code>Ticket.Create(title, priority)</code>. Razem z prywatnym konstruktorem i <code>{ get; private set; }</code> daje jedno wejście, w którym można wymusić niezmienniki. EF Core materializuje encje refleksją, więc prywatne konstruktory i settery mu nie przeszkadzają. Lekcja <a href="../lessons/0009-ef-core-sqlite.html">0009</a>.</dd>
+
+  <dt>ORM <span class="pl">— Object-Relational Mapper</span></dt>
+  <dd>Biblioteka tłumacząca obiekty na wiersze i z powrotem, a zapytania w języku hosta na SQL. W .NET domyślnie <strong>EF Core</strong>. Odpowiednik Prismy albo Drizzle'a z frontendu. Lekcja 0009.</dd>
 
   <dt>DbContext</dt>
-  <dd>Główna klasa EF Core: sesja z bazą + zestaw <code>DbSet&lt;T&gt;</code> (tabel). Rejestrowany jako Scoped.</dd>
+  <dd>Główna klasa EF Core: sesja z bazą + zestaw <code>DbSet&lt;T&gt;</code> (tabel). Rejestrowany przez <code>AddDbContext</code> jako <strong>Scoped</strong> — nie jest thread-safe, więc jeden na żądanie. Lekcja 0009.</dd>
+
+  <dt>DbSet&lt;T&gt;</dt>
+  <dd>Reprezentacja tabeli. <code>db.Tickets.Where(...)</code> nie filtruje listy w pamięci — buduje <code>SELECT</code>, który poleci do bazy dopiero przy <code>ToListAsync</code> / <code>FirstOrDefaultAsync</code> / <code>AnyAsync</code>. Lekcja 0009.</dd>
+
+  <dt>IEntityTypeConfiguration&lt;T&gt;</dt>
+  <dd>Klasa opisująca mapowanie jednej encji: klucz, kolumny, indeksy, relacje, seed. Jedna encja = jeden plik. <code>DbContext</code> podpina wszystkie jedną linią <code>modelBuilder.ApplyConfigurationsFromAssembly(...)</code> — ten sam wzorzec skanowania assembly co <code>AddValidatorsFromAssemblyContaining</code>. Bez tej linii konfiguracja jest ignorowana bez żadnego błędu. Lekcja <a href="../lessons/0009-ef-core-sqlite.html">0009</a>.</dd>
+
+  <dt>Provider <span class="pl">— dostawca bazy</span></dt>
+  <dd>Pakiet tłumaczący LINQ na SQL konkretnego silnika: <code>…EntityFrameworkCore.Sqlite</code>, <code>.SqlServer</code>, <code>Npgsql…PostgreSQL</code>. Wybierany raz, przez <code>UseSqlite(...)</code> w <code>AddDbContext</code>. Lekcja 0009.</dd>
+
+  <dt>Connection string</dt>
+  <dd>Adres bazy. Dla SQLite to sama ścieżka do pliku (<code>Data Source=helpdesk.db</code>); dla serwera zawiera hasło, więc nie trzyma się go w <code>appsettings.json</code>, tylko w zmiennych środowiskowych lub user secrets. Lekcja 0009.</dd>
+
+  <dt>Change tracking <span class="pl">— śledzenie zmian</span></dt>
+  <dd>Mechanizm EF: wczytana encja jest obserwowana, a <code>SaveChangesAsync</code> porównuje jej stan z zapamiętanym i wysyła <code>UPDATE</code> tylko dla zmienionych kolumn. Dlatego zapis to zwykłe przypisanie do właściwości, bez żadnego <code>.Update(...)</code>. Lekcja 0009.</dd>
+
+  <dt>AsNoTracking()</dt>
+  <dd>Wyłącza śledzenie dla danego zapytania. Reguła kciuka: <em>query</em> → <code>AsNoTracking()</code>, <em>command</em> → bez, bo bez trackingu nie da się zapisać zmiany. Lekcja 0009.</dd>
 
   <dt>Migration <span class="pl">— migracja</span></dt>
-  <dd>Wygenerowany kod opisujący zmianę schematu bazy. <code>dotnet ef migrations add Nazwa</code>, potem <code>dotnet ef database update</code>.</dd>
+  <dd>Wygenerowany kod opisujący zmianę schematu bazy (<code>Up()</code> w przód, <code>Down()</code> wstecz). <code>dotnet ef migrations add Nazwa</code> tylko generuje kod, <code>dotnet ef database update</code> wykonuje go na bazie. Migracje wchodzą do repozytorium; plik <code>.db</code> nie. Lekcja 0009.</dd>
+
+  <dt>Model snapshot <span class="pl">— migawka modelu</span></dt>
+  <dd><code>…ModelSnapshot.cs</code> — zapisany stan modelu po ostatniej migracji. To z nim, a nie z bazą, porównywany jest kod przy generowaniu następnej migracji. Skasowanie migracji ręcznie bez poprawienia snapshotu psuje kolejną. Lekcja 0009.</dd>
+
+  <dt>Seed data <span class="pl">— dane startowe</span></dt>
+  <dd><code>HasData(...)</code> w <code>OnModelCreating</code>. Trafiają do migracji jako <code>InsertData</code>, więc powstają razem ze schematem — nie w kodzie startowym aplikacji. Lekcja 0009.</dd>
+
+  <dt>__EFMigrationsHistory</dt>
+  <dd>Tabela w bazie z listą zaaplikowanych migracji. Źródło prawdy o tym, czy schemat jest aktualny — samo istnienie pliku <code>.db</code> nic nie znaczy (SQLite tworzy pusty plik przy pierwszym połączeniu). Lekcja 0009.</dd>
 </dl>
 
 <h2>Struktura projektu</h2>
@@ -238,6 +271,7 @@
   <thead><tr><th>C#</th><th>TS/JS odpowiednik</th><th>Uwagi</th></tr></thead>
   <tbody>
     <tr><td><code>var x = 5;</code></td><td><code>const x = 5;</code></td><td><code>var</code> = inferencja typu, nie „dynamiczny”. Średnik obowiązkowy.</td></tr>
+    <tr><td><code>var t = GetTicket();</code></td><td>—</td><td><strong>Dla typów referencyjnych <code>var</code> zawsze wywnioskuje wariant nullowalny</strong> (<code>Ticket?</code>), nawet gdy metoda zwraca <code>Ticket</code>. To celowe: dzięki temu późniejsze <code>t = null;</code> nie daje ostrzeżenia. Bezpieczeństwa nie tracisz — pilnuje go analiza przepływu („<em>is not null here</em>” w podpowiedzi IDE), a nie sama adnotacja. Chcesz nienullowalny typ zadeklarowany — napisz go wprost: <code>Ticket t = …</code>.</td></tr>
     <tr><td><code>() =&gt; "hi"</code></td><td><code>() =&gt; "hi"</code></td><td>Lambda. Identyczna składnia.</td></tr>
     <tr><td><code>new { Id = 1 }</code></td><td><code>{ id: 1 }</code></td><td>Typ anonimowy. Serializuje się do JSON z camelCase.</td></tr>
     <tr><td><code>record Foo(int Id);</code></td><td><code>type Foo = { readonly id: number }</code></td><td>Plus konstruktor, równość, <code>with</code>.</td></tr>

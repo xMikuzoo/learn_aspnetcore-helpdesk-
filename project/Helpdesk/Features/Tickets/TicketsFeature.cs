@@ -12,7 +12,7 @@ public static class TicketsFeature
 {
     public static IServiceCollection AddTickets(this IServiceCollection services)
     {
-        services.AddSingleton<ITicketStore, InMemoryTicketStore>();
+        services.AddScoped<ITicketStore, EfTicketStore>();
         services.AddSingleton<TicketMetrics>();
 
         services.AddScoped<ICommandHandler<CreateTicketCommand, TicketDto>, CreateTicketHandler>();

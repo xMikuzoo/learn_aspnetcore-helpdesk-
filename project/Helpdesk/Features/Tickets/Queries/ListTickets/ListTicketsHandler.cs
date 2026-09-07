@@ -4,9 +4,10 @@ namespace Helpdesk.Features.Tickets.Queries.ListTickets;
 
 public class ListTicketsHandler(ITicketStore store) : IQueryHandler<ListTicketsQuery, IReadOnlyList<TicketDto>>
 {
-    public Task<IReadOnlyList<TicketDto>> HandleAsync(ListTicketsQuery query, CancellationToken cancellationToken = default)
+    public async Task<IReadOnlyList<TicketDto>> HandleAsync(ListTicketsQuery query, CancellationToken cancellationToken = default)
     {
-        IReadOnlyList<TicketDto> tickets = [.. store.GetAll().Select(TicketDto.From)];
-        return Task.FromResult(tickets);
+        var tickets = await store.GetAllAsync(cancellationToken);
+
+        return [.. tickets.Select(TicketDto.From)];
     }
 }

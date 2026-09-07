@@ -5,13 +5,13 @@ namespace Helpdesk.Features.Tickets.Commands.UpdateTicket;
 
 public class UpdateTicketHandler(ITicketStore store) : ICommandHandler<UpdateTicketCommand, Unit>
 {
-    public Task<Unit> HandleAsync(UpdateTicketCommand command, CancellationToken cancellationToken = default)
+    public async Task<Unit> HandleAsync(UpdateTicketCommand command, CancellationToken cancellationToken = default)
     {
-        if (!store.Update(command.Id, command.Title, command.Priority))
+        if (!await store.UpdateAsync(command.Id, command.Title, command.Priority, cancellationToken))
         {
             throw new DomainException(TicketErrors.NotFound(command.Id));
         }
 
-        return Task.FromResult(Unit.Value);
+        return Unit.Value;
     }
 }

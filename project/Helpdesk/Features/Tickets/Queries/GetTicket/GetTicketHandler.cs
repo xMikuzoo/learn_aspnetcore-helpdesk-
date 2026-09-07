@@ -5,10 +5,11 @@ namespace Helpdesk.Features.Tickets.Queries.GetTicket;
 
 public class GetTicketHandler(ITicketStore store) : IQueryHandler<GetTicketQuery, TicketDto>
 {
-    public Task<TicketDto> HandleAsync(GetTicketQuery query, CancellationToken cancellationToken = default)
+    public async Task<TicketDto> HandleAsync(GetTicketQuery query, CancellationToken cancellationToken = default)
     {
-        var ticket = store.GetById(query.Id) ?? throw new DomainException(TicketErrors.NotFound(query.Id));
+        var ticket = await store.GetByIdAsync(query.Id, cancellationToken)
+            ?? throw new DomainException(TicketErrors.NotFound(query.Id));
 
-        return Task.FromResult(TicketDto.From(ticket));
+        return TicketDto.From(ticket);
     }
 }
