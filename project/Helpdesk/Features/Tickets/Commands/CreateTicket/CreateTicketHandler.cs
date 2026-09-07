@@ -6,7 +6,7 @@ namespace Helpdesk.Features.Tickets.Commands.CreateTicket;
 public class CreateTicketHandler(ITicketStore store, TicketMetrics metrics, ICurrentUser user)
     : ICommandHandler<CreateTicketCommand, TicketDto>
 {
-    public async Task<TicketDto> HandleAsync(CreateTicketCommand command, CancellationToken cancellationToken = default)
+    public async Task<TicketDto> Handle(CreateTicketCommand command, CancellationToken cancellationToken)
     {
         if (await store.TitleExistsAsync(command.Title, cancellationToken))
         {

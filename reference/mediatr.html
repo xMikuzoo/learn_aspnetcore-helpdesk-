@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MediatR — ściąga</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<div class="page">
+<header class="lesson-head">
+  <div class="kicker">Reference · CQRS</div>
+  <h1>MediatR</h1>
+  <p class="subtitle">Ściąga do druku. Zweryfikowane na .NET 10.0.400 i <strong>MediatR 14.2.0</strong>; nazwy i zmiany wersji wg <a href="https://github.com/luckypennysoftware/mediatr/wiki">MediatR Wiki</a>.</p>
+  <p class="meta">Ćwiczone w <a href="../lessons/0010-mediatr.html">lekcji 0010</a>. Poprzednik: <a href="dispatcher-isender.html">własny dispatcher</a>. Walidacja: <a href="fluentvalidation.html">FluentValidation</a>.</p>
+</header>
+
+<h2>Instalacja i rejestracja</h2>
+<pre><code>dotnet add package MediatR</code></pre>
+<pre><code>services.AddMediatR(configuration =&gt;
+{
+    configuration.RegisterServicesFromAssemblyContaining&lt;Program&gt;();
+    configuration.AddOpenBehavior(typeof(ValidationBehavior&lt;,&gt;));
+});</code></pre>
+<p>Skan assembly rejestruje wszystkie <code>IRequestHandler</code> i <code>INotificationHandler</code>. Behaviory odpalają się w kolejności rejestracji.</p>
+
+<h2>Typy biblioteki</h2>
+<table>
+  <thead><tr><th>Typ</th><th>Rola</th></tr></thead>
+  <tbody>
+    <tr><td><code>IRequest&lt;out TResponse&gt;</code></td><td>marker wiadomości z wynikiem</td></tr>
+    <tr><td><code>IRequest</code></td><td>marker wiadomości bez wyniku (od v12 <em>nie</em> jest <code>IRequest&lt;Unit&gt;</code>)</td></tr>
+    <tr><td><code>IRequestHandler&lt;TRequest, TResponse&gt;</code></td><td><code>Task&lt;TResponse&gt; Handle(request, ct)</code></td></tr>
+    <tr><td><code>IRequestHandler&lt;in TRequest&gt;</code></td><td><code>Task Handle(request, ct)</code></td></tr>
+    <tr><td><code>ISender</code></td><td><code>Send(request, ct)</code> — to wstrzykujesz do endpointu</td></tr>
+    <tr><td><code>IPublisher</code> / <code>INotification</code></td><td>zdarzenia „jeden do wielu”, bez odpowiedzi</td></tr>
+    <tr><td><code>IMediator</code></td><td><code>ISender</code> + <code>IPublisher</code>; wstrzykuj węższy</td></tr>
+    <tr><td><code>IPipelineBehavior&lt;TRequest, TResponse&gt;</code></td><td>ogniwo łańcucha wokół handlera</td></tr>
+  </tbody>
+</table>
+
+<h2>Warstwa nazw nad <code>IRequest</code></h2>
+<pre><code>public interface ICommandBase;
+
+public interface ICommand : IRequest, ICommandBase;
+public interface ICommand&lt;out TResponse&gt; : IRequest&lt;TResponse&gt;, ICommandBase;
+public interface IQuery&lt;out TResponse&gt; : IRequest&lt;TResponse&gt;, ICommandBase;
+
+public interface ICommandHandler&lt;in TCommand&gt; : IRequestHandler&lt;TCommand&gt;
+    where TCommand : ICommand;
+public interface ICommandHandler&lt;in TCommand, TResponse&gt; : IRequestHandler&lt;TCommand, TResponse&gt;
+    where TCommand : ICommand&lt;TResponse&gt;;
+public interface IQueryHandler&lt;in TQuery, TResponse&gt; : IRequestHandler&lt;TQuery, TResponse&gt;
+    where TQuery : IQuery&lt;TResponse&gt;;</code></pre>
+<p>Zero logiki. Daje: rozróżnienie command/query (MediatR go nie zna), constraint uniemożliwiający pomylenie handlerów, i marker, po którym ograniczają się behaviory.</p>
+<div class="callout warn">
+  <code>IQuery</code> też dziedziczy po <code>ICommandBase</code> — marker mimo nazwy obejmuje zapytania. Behavior z <code>where TRequest : ICommandBase</code> odpali się na <code>GET</code>. Dobre dla walidacji, złe dla transakcji i audytu.
+</div>
+
+<h2>Pipeline behavior</h2>
+<pre><code>public class ValidationBehavior&lt;TRequest, TResponse&gt;(IEnumerable&lt;IValidator&lt;TRequest&gt;&gt; validators)
+    : IPipelineBehavior&lt;TRequest, TResponse&gt;
+    where TRequest : ICommandBase
+{
+    public async Task&lt;TResponse&gt; Handle(
+        TRequest request,
+        RequestHandlerDelegate&lt;TResponse&gt; next,
+        CancellationToken cancellationToken)
+    {
+        // przed
+        var response = await next(cancellationToken);
+        // po
+        return response;
+    }
+}</code></pre>
+<p>Nie wywołasz <code>next</code> — łańcuch się urywa i handler nie zobaczy wiadomości. Typowe behaviory: walidacja, logowanie, pomiar czasu, transakcja, retry, cache.</p>
+<p>Bezwynikowy request też przechodzi przez pipeline — wewnątrz biblioteki jego <code>TResponse</code> to <code>Unit</code>. Behavior odpala się normalnie (sprawdzone: <code>PUT</code> z pustym tytułem daje 400).</p>
+
+<h2>Mapowanie z własnego dispatchera</h2>
+<table>
+  <thead><tr><th>Lekcje 0006–0008</th><th>MediatR</th></tr></thead>
+  <tbody>
+    <tr><td><code>ICommand&lt;TResult&gt;</code> (marker własny)</td><td><code>IRequest&lt;TResponse&gt;</code> pod spodem</td></tr>
+    <tr><td><code>ICommandHandler&lt;TCommand, TResult&gt;</code></td><td><code>IRequestHandler&lt;TRequest, TResponse&gt;</code></td></tr>
+    <tr><td><code>HandleAsync(cmd, ct = default)</code></td><td><code>Handle(request, ct)</code> — bez <code>= default</code></td></tr>
+    <tr><td><code>ICommand&lt;Unit&gt;</code> + <code>return Unit.Value;</code></td><td><code>IRequest</code> + <code>Task</code></td></tr>
+    <tr><td><code>Sender</code> (refleksja + <code>dynamic</code>)</td><td>silnik biblioteki (cache typów, opakowania)</td></tr>
+    <tr><td><code>ValidationSender</code> (dekorator <code>ISender</code>)</td><td><code>IPipelineBehavior</code></td></tr>
+    <tr><td>ręczne <code>AddScoped</code> per handler</td><td><code>RegisterServicesFromAssemblyContaining&lt;Program&gt;()</code></td></tr>
+  </tbody>
+</table>
+
+<h2>Wersje i licencja</h2>
+<table>
+  <thead><tr><th>Wersja</th><th>Co warto wiedzieć</th></tr></thead>
+  <tbody>
+    <tr><td>≤ 11</td><td><code>IRequest : IRequest&lt;Unit&gt;</code>; bezwynikowy handler zwraca <code>Task&lt;Unit&gt;</code></td></tr>
+    <tr><td>12.x</td><td>osobna ścieżka bezwynikowa (<code>IRequest : IBaseRequest</code>, <code>Task Handle</code>). Ostatnia na <strong>Apache 2.0</strong></td></tr>
+    <tr><td>13+ (w tym 14.x)</td><td>podwójna licencja; produkcja wymaga klucza. Community bezpłatne poniżej 5 mln USD przychodu, ale klucz i tak trzeba wygenerować</td></tr>
+  </tbody>
+</table>
+<p>Bez klucza aplikacja działa, tylko loguje przy starcie:</p>
+<pre><code>warn: LuckyPennySoftware.MediatR.License[0]
+      You do not have a valid license key for the Lucky Penny software MediatR.
+      This is allowed for development and testing scenarios.</code></pre>
+<p>Klucz: <code>cfg.LicenseKey = "…"</code>, <code>Mediator.LicenseKey = "…"</code> albo zmienna <code>MEDIATR_LICENSE_KEY</code> / <code>LUCKYPENNY_LICENSE_KEY</code>. Alternatywa na MIT o niemal identycznym API, generator kodu zamiast refleksji: <a href="https://github.com/martinothamar/Mediator">martinothamar/Mediator</a>.</p>
+
+<h2>Katalog błędów</h2>
+<table>
+  <thead><tr><th>Komunikat</th><th>Przyczyna</th></tr></thead>
+  <tbody>
+    <tr><td><code>CS0246: nie znaleziono typu 'ISender'</code></td><td>brak <code>using MediatR;</code></td></tr>
+    <tr><td><code>CS0535: nie implementuje 'IRequestHandler&lt;…&gt;.Handle(…)'</code></td><td>metoda nazywa się <code>HandleAsync</code> albo ma <code>CancellationToken … = default</code></td></tr>
+    <tr><td><em>brak błędu</em>: walidacja przestaje działać</td><td>brak <code>AddOpenBehavior(typeof(ValidationBehavior&lt;,&gt;))</code></td></tr>
+    <tr><td><em>brak błędu</em>: żaden handler nie odpowiada</td><td>brak <code>RegisterServicesFromAssemblyContaining</code> albo handler w innym assembly</td></tr>
+    <tr><td><code>No service for type 'IRequestHandler&lt;…&gt;'</code></td><td>handler nie został znaleziony przez skan — sprawdź, czy klasa jest publiczna i niesabstrakcyjna</td></tr>
+  </tbody>
+</table>
+
+<h2>Czego nie robić</h2>
+<table>
+  <thead><tr><th>Pułapka</th><th>Dlaczego boli</th></tr></thead>
+  <tbody>
+    <tr><td>handler woła <code>sender.Send(...)</code></td><td>ukryta zależność między feature'ami; wyciągnij wspólny kod do serwisu</td></tr>
+    <tr><td><code>IMediator</code> wszędzie</td><td>wstrzykuj <code>ISender</code>; węższy interfejs mówi, że nie publikujesz zdarzeń</td></tr>
+    <tr><td>behavior bez constraintu</td><td>odpali się na każdym requeście, także cudzym z biblioteki</td></tr>
+    <tr><td>behavior transakcyjny na <code>ICommandBase</code></td><td>otworzy transakcję także dla <code>GET</code></td></tr>
+    <tr><td>logika w behaviorze zależna od konkretnego typu</td><td>behavior ma być generyczny; warunki per komenda to sprawa handlera</td></tr>
+  </tbody>
+</table>
+
+<nav class="lesson-nav">
+  <a href="dispatcher-isender.html">← Ściąga: własny dispatcher</a>
+  <a href="fluentvalidation.html">Ściąga: FluentValidation</a>
+  <a href="../lessons/0010-mediatr.html">Lekcja 0010 →</a>
+</nav>
+</div>
+</body>
+</html>

@@ -153,7 +153,7 @@ The following constructors had parameters that could not be bound to properties 
     <tr><td><code>Infrastructure/Persistence/Configurations/</code></td><td>Clean Architecture — warstwa domeny nie ma prawa znać EF-a, więc <code>IEntityTypeConfiguration</code> nie może leżeć obok encji</td></tr>
   </tbody>
 </table>
-<p><code>ApplyConfigurationsFromAssembly</code> znajdzie ją tak czy inaczej — byle była w skanowanym assembly. Wracamy do tego w lekcji 0010.</p>
+<p><code>ApplyConfigurationsFromAssembly</code> znajdzie ją tak czy inaczej — byle była w skanowanym assembly. Wracamy do tego w lekcji 0011.</p>
 
 <h3>Co jeszcze wchodzi do <code>Configure</code>: relacje</h3>
 <p>Nasz <code>Ticket</code> nie ma jeszcze relacji, ale w firmowym kodzie zobaczysz je głównie tutaj i warto umieć to przeczytać:</p>
@@ -434,7 +434,7 @@ Priority = table.Column&lt;string&gt;(type: "TEXT", nullable: false)</code></pre
     <tr><td>wymusza granicę, którą Clean Architecture i tak narzuci</td><td>repozytorium nad ORM-em zwykle degeneruje się do <code>GetByXAndYAndZ</code></td></tr>
   </tbody>
 </table>
-<p>Szkoła <em>vertical slices</em> (Milan Jovanović, którego zna wasz zespół) częściej wybiera drugą kolumnę: <code>DbContext</code> prosto w handlerze, bo slice ma być samowystarczalny. Szkoła <em>Clean Architecture</em> wybiera pierwszą, bo warstwa domeny nie ma prawa znać EF-a. Wracamy do tego w lekcji 0010 — i to jest pytanie, które warto zadać na code review w pracy, bo odpowiedź mówi więcej o architekturze repo niż nazwy folderów.</p>
+<p>Szkoła <em>vertical slices</em> (Milan Jovanović, którego zna wasz zespół) częściej wybiera drugą kolumnę: <code>DbContext</code> prosto w handlerze, bo slice ma być samowystarczalny. Szkoła <em>Clean Architecture</em> wybiera pierwszą, bo warstwa domeny nie ma prawa znać EF-a. Wracamy do tego w lekcji 0011 — i to jest pytanie, które warto zadać na code review w pracy, bo odpowiedź mówi więcej o architekturze repo niż nazwy folderów.</p>
 
 <h2>Sprawdź się</h2>
 
@@ -559,7 +559,7 @@ Priority = table.Column&lt;string&gt;(type: "TEXT", nullable: false)</code></pre
 </div>
 
 <h2>Co dalej</h2>
-<p>Lekcja 0010: <strong>Clean Architecture</strong>. Ten sam Helpdesk rozłożony na warstwy, kierunek zależności, i odpowiedź na pytanie z tabeli wyżej — dlaczego w firmowym repo <code>DbContext</code> siedzi w innym projekcie niż handlery.</p>
+<p>Lekcja 0011: <strong>Clean Architecture</strong>. Ten sam Helpdesk rozłożony na warstwy, kierunek zależności, i odpowiedź na pytanie z tabeli wyżej — dlaczego w firmowym repo <code>DbContext</code> siedzi w innym projekcie niż handlery.</p>
 
 <nav class="lesson-nav">
   <a href="0008-fluentvalidation-pipeline.html">← Lekcja 0008</a>

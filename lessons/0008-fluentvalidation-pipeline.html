@@ -17,6 +17,10 @@
   <p class="meta">Wymaga: <a href="0006-dispatcher-isender.html">lekcji 0006</a> (<code>ISender</code>) i <a href="0007-bledy-problemdetails.html">0007</a> (<code>ProblemDetails</code>). Ściągi: <a href="../reference/fluentvalidation.html">FluentValidation</a>, <a href="../reference/curl-bash.html">curl</a>.</p>
 </header>
 
+<div class="callout warn">
+  <strong>Uwaga: projekt poszedł dalej.</strong> Od <a href="0010-mediatr.html">lekcji 0010</a> Helpdesk używa <strong>MediatR</strong> — <code>Sender</code>, <code>ISender</code>, <code>Unit</code> i <code>ValidationSender</code> zostały skasowane, a <code>HandleAsync</code> nazywa się <code>Handle</code>. Ta lekcja jest migawką stanu sprzed migracji i celowo jej nie zmieniamy: bez ręcznego dispatchera nie da się zrozumieć, co robi biblioteka.
+</div>
+
 <h2>Zanim zaczniemy: jak strzelać w API curlem</h2>
 <p>Cała ta lekcja to sprawdzanie, co API odpowiada na zepsute żądania. Poniżej komendy do skopiowania — <strong>sprawdzone w twoim Git Bashu</strong> (curl 8.16.0, Windows 11). Apostrofy wokół JSON-a załatwiają cudzysłowy i spacje; backslash <code>\</code> na końcu linii łamie długą komendę.</p>
 

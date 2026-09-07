@@ -1,4 +1,4 @@
-using Helpdesk.Common;
+using MediatR;
 using Microsoft.AspNetCore.Http.HttpResults;
 
 namespace Helpdesk.Features.Tickets.Commands.CreateTicket;

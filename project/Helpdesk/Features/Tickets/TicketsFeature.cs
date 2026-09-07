@@ -1,4 +1,3 @@
-using Helpdesk.Common;
 using Helpdesk.Features.Tickets.Commands.CreateTicket;
 using Helpdesk.Features.Tickets.Commands.DeleteTicket;
 using Helpdesk.Features.Tickets.Commands.UpdateTicket;
@@ -14,14 +13,6 @@ public static class TicketsFeature
     {
         services.AddScoped<ITicketStore, EfTicketStore>();
         services.AddSingleton<TicketMetrics>();
-
-        services.AddScoped<ICommandHandler<CreateTicketCommand, TicketDto>, CreateTicketHandler>();
-        services.AddScoped<ICommandHandler<UpdateTicketCommand, Unit>, UpdateTicketHandler>();
-        services.AddScoped<ICommandHandler<DeleteTicketCommand, Unit>, DeleteTicketHandler>();
-
-        services.AddScoped<IQueryHandler<GetTicketQuery, TicketDto>, GetTicketHandler>();
-        services.AddScoped<IQueryHandler<ListTicketsQuery, IReadOnlyList<TicketDto>>, ListTicketsHandler>();
-        services.AddScoped<IQueryHandler<GetTicketMetricsQuery, TicketMetricsDto>, GetTicketMetricsHandler>();
 
         return services;
     }

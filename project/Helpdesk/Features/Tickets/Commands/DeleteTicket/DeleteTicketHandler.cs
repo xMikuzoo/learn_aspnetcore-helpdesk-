@@ -3,15 +3,13 @@ using Helpdesk.Common.Errors;
 
 namespace Helpdesk.Features.Tickets.Commands.DeleteTicket;
 
-public class DeleteTicketHandler(ITicketStore store) : ICommandHandler<DeleteTicketCommand, Unit>
+public class DeleteTicketHandler(ITicketStore store) : ICommandHandler<DeleteTicketCommand>
 {
-    public async Task<Unit> HandleAsync(DeleteTicketCommand command, CancellationToken cancellationToken = default)
+    public async Task Handle(DeleteTicketCommand command, CancellationToken cancellationToken)
     {
         if (!await store.DeleteAsync(command.Id, cancellationToken))
         {
             throw new DomainException(TicketErrors.NotFound(command.Id));
         }
-
-        return Unit.Value;
     }
 }

@@ -17,6 +17,10 @@
   <p class="meta">Wymaga: <a href="0005-command-query-handlery.html">lekcji 0005</a> (handlery) i struktury <code>Commands/</code> / <code>Queries/</code>. Ściąga: <a href="../reference/dispatcher-isender.html">Dispatcher / ISender</a>.</p>
 </header>
 
+<div class="callout warn">
+  <strong>Uwaga: projekt poszedł dalej.</strong> Od <a href="0010-mediatr.html">lekcji 0010</a> Helpdesk używa <strong>MediatR</strong> — <code>Sender</code>, <code>ISender</code>, <code>Unit</code> i <code>ValidationSender</code> zostały skasowane, a <code>HandleAsync</code> nazywa się <code>Handle</code>. Ta lekcja jest migawką stanu sprzed migracji i celowo jej nie zmieniamy: bez ręcznego dispatchera nie da się zrozumieć, co robi biblioteka.
+</div>
+
 <h2>Problem: endpoint zna handlera po imieniu</h2>
 <p>Tak wygląda dziś twój endpoint tworzenia zgłoszenia:</p>
 <pre><code><span class="kw">private static async</span> <span class="ty">Task</span>&lt;<span class="ty">Created</span>&lt;<span class="ty">TicketDto</span>&gt;&gt; HandleAsync(
@@ -228,7 +232,7 @@ from root provider.</span></code></pre>
   </tbody>
 </table>
 <p>Ostatni wiersz to najczęstszy zarzut wobec mediatorów i wart jest zapamiętania, bo pada na rozmowach: <em>„nawigacja po kodzie przestaje działać”</em>. W IDE ratują cię wtyczki (Rider skacze z commanda do handlera), w code review — konwencja nazw <code>XCommand</code> / <code>XHandler</code>, którą już masz.</p>
-<p>Cenę z pierwszego wiersza łagodzi się na dwa sposoby: <strong>automatyczną rejestracją</strong> handlerów (skan assembly zamiast ręcznych linii — tak działa <code>AddMediatR</code>) albo <strong>testem integracyjnym</strong>, który dotyka każdej trasy. Do obu wrócimy: skan przy MediatR, testy w lekcji 0011.</p>
+<p>Cenę z pierwszego wiersza łagodzi się na dwa sposoby: <strong>automatyczną rejestracją</strong> handlerów (skan assembly zamiast ręcznych linii — tak działa <code>AddMediatR</code>) albo <strong>testem integracyjnym</strong>, który dotyka każdej trasy. Do obu wrócimy: skan przy MediatR, testy w lekcji 0012.</p>
 
 <h2>MediatR w pięć minut</h2>
 <p>Napisałeś właśnie mediator. MediatR to ten sam pomysł, dopracowany: cache typów zamiast refleksji przy każdym żądaniu, opakowania zamiast <code>dynamic</code>, do tego notyfikacje i pipeline. Mapowanie nazw jeden do jednego:</p>

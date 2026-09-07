@@ -16,8 +16,11 @@ public static class CommonServices
 
     public static IServiceCollection AddDispatcher(this IServiceCollection services)
     {
-        services.AddScoped<Sender>();
-        services.AddScoped<ISender, ValidationSender>();
+        services.AddMediatR(configuration =>
+        {
+            configuration.RegisterServicesFromAssemblyContaining<Program>();
+            configuration.AddOpenBehavior(typeof(ValidationBehavior<,>));
+        });
 
         return services;
     }

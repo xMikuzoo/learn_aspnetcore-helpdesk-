@@ -3,15 +3,13 @@ using Helpdesk.Common.Errors;
 
 namespace Helpdesk.Features.Tickets.Commands.UpdateTicket;
 
-public class UpdateTicketHandler(ITicketStore store) : ICommandHandler<UpdateTicketCommand, Unit>
+public class UpdateTicketHandler(ITicketStore store) : ICommandHandler<UpdateTicketCommand>
 {
-    public async Task<Unit> HandleAsync(UpdateTicketCommand command, CancellationToken cancellationToken = default)
+    public async Task Handle(UpdateTicketCommand command, CancellationToken cancellationToken)
     {
         if (!await store.UpdateAsync(command.Id, command.Title, command.Priority, cancellationToken))
         {
             throw new DomainException(TicketErrors.NotFound(command.Id));
         }
-
-        return Unit.Value;
     }
 }

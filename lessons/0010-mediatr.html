@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>0010 · Migracja na MediatR — ASP.NET Core dla frontendowca</title>
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/quiz.js" defer></script>
+<script src="../assets/checklist.js" defer></script>
+</head>
+<body>
+<div class="page">
+<header class="lesson-head">
+  <div class="kicker">Lekcja 0010 · ~20 min · projekt Helpdesk</div>
+  <h1>Wymiana własnego dispatchera na <code>MediatR</code></h1>
+  <p class="subtitle">Cel: skasować <code>Sender</code>, <code>ISender</code>, <code>Unit</code> i <code>ValidationSender</code>, a na ich miejsce wstawić bibliotekę — i zbudować dokładnie tę warstwę interfejsów, którą masz w firmowym repo.</p>
+  <p class="meta">Wymaga: <a href="0006-dispatcher-isender.html">lekcji 0006</a> (własny dispatcher) i <a href="0008-fluentvalidation-pipeline.html">0008</a> (walidacja w pipelinie). Ściągi: <a href="../reference/mediatr.html">MediatR</a>, <a href="../reference/dispatcher-isender.html">dispatcher</a>.</p>
+</header>
+
+<div class="callout">
+  <strong>Skąd ta lekcja.</strong> Pokazałeś kod z pracy — wasze <code>ICommand</code> / <code>IQuery</code> / <code>ICommandHandler</code> to cienka warstwa nad MediatR. Przepisujemy Helpdesk na dokładnie ten sam układ, żeby firmowe repo przestało wymagać tłumaczenia.
+</div>
+
+<h2>Co znika, co przychodzi</h2>
+<table>
+  <thead><tr><th>Twój kod z lekcji 0006–0008</th><th>Po migracji</th></tr></thead>
+  <tbody>
+    <tr><td><code>Common/ISender.cs</code></td><td><code>MediatR.ISender</code> — ta sama nazwa, ta sama metoda <code>Send</code></td></tr>
+    <tr><td><code>Common/Sender.cs</code> (refleksja + <code>dynamic</code>)</td><td>silnik biblioteki</td></tr>
+    <tr><td><code>Common/Unit.cs</code></td><td>niepotrzebny — MediatR ma osobną, bezwynikową ścieżkę</td></tr>
+    <tr><td><code>ValidationSender</code> (dekorator)</td><td><code>ValidationBehavior&lt;TRequest, TResponse&gt;</code></td></tr>
+    <tr><td>6 × <code>AddScoped&lt;ICommandHandler&lt;…&gt;, …&gt;</code></td><td><code>RegisterServicesFromAssemblyContaining&lt;Program&gt;()</code></td></tr>
+    <tr><td><code>HandleAsync</code></td><td><code>Handle</code> (nazwa z MediatR)</td></tr>
+  </tbody>
+</table>
+<p>Bilans: minus cztery pliki i minus osiem linii rejestracji, plus jedna zależność. Endpointy — <strong>bez zmian</strong> poza jednym <code>using</code>-iem. To była pointa lekcji 0006: własny <code>ISender</code> nazwany tak samo jak w bibliotece czyni podmianę zmianą importu.</p>
+
+<h2>Krok 1 — pakiet</h2>
+<pre><code>dotnet add package MediatR</code></pre>
+<p>Wpadło <strong>14.2.0</strong>. Przy pierwszym uruchomieniu zobaczysz w konsoli:</p>
+<pre><code>warn: LuckyPennySoftware.MediatR.License[0]
+      You do not have a valid license key for the Lucky Penny software MediatR.
+      This is allowed for development and testing scenarios. If you are running in production
+      you are required to have a licensed version.</code></pre>
+<div class="callout warn">
+  <strong>To ostrzeżenie, nie błąd</strong> — aplikacja działa normalnie. MediatR do 12.x był na Apache 2.0; od 13 jest podwójnie licencjonowany i <em>produkcyjne</em> użycie wymaga klucza. Próg Community (poniżej 5 mln USD przychodu) jest bezpłatny, ale klucz i tak trzeba wygenerować i wstawić w <code>cfg.LicenseKey</code> albo w zmienną <code>MEDIATR_LICENSE_KEY</code>. Do nauki nic nie robimy — ostrzeżenie zostaje.<br><br>
+  Pytanie do zespołu: <em>której wersji używacie i kto pilnuje klucza?</em> Jeśli 12.x — Apache, temat nie istnieje. Alternatywa na MIT o prawie identycznym API: <a href="https://github.com/martinothamar/Mediator">martinothamar/Mediator</a>.
+</div>
+
+<h2>Krok 2 — warstwa nazw nad <code>IRequest</code></h2>
+<p>MediatR zna tylko <em>request</em>. Nie zna pojęć „command” i „query” — te dokładamy sami, i to jest ta warstwa, którą masz w pracy:</p>
+<p class="filename">Common/Cqrs.cs — cały plik po migracji</p>
+<pre><code>public interface ICommandBase;
+
+public interface ICommand : IRequest, ICommandBase;
+
+public interface ICommand&lt;out TResponse&gt; : IRequest&lt;TResponse&gt;, ICommandBase;
+
+public interface IQuery&lt;out TResponse&gt; : IRequest&lt;TResponse&gt;, ICommandBase;
+
+public interface ICommandHandler&lt;in TCommand&gt; : IRequestHandler&lt;TCommand&gt;
+    where TCommand : ICommand;
+
+public interface ICommandHandler&lt;in TCommand, TResponse&gt; : IRequestHandler&lt;TCommand, TResponse&gt;
+    where TCommand : ICommand&lt;TResponse&gt;;
+
+public interface IQueryHandler&lt;in TQuery, TResponse&gt; : IRequestHandler&lt;TQuery, TResponse&gt;
+    where TQuery : IQuery&lt;TResponse&gt;;</code></pre>
+<p>Siedem linii, zero logiki. Co za nie kupujesz:</p>
+<ul>
+  <li><strong>Intencję w nazwie.</strong> <code>IQuery&lt;TicketDto&gt;</code> i <code>ICommand&lt;TicketDto&gt;</code> są technicznie identyczne — oba to <code>IRequest&lt;TicketDto&gt;</code>. Różni je tylko słowo, ale to słowo jest całym CQRS z <a href="0005-command-query-handlery.html">lekcji 0005</a>.</li>
+  <li><strong>Constraint, którego MediatR nie ma.</strong> <code>where TCommand : ICommand&lt;TResponse&gt;</code> sprawia, że handler komendy nie skompiluje się z zapytaniem w środku. Goły <code>IRequestHandler</code> na to pozwala.</li>
+  <li><strong>Punkt zaczepienia dla pipeline'u.</strong> <code>ICommandBase</code> nie ma żadnej składowej — istnieje po to, żeby behavior mógł napisać <code>where TRequest : ICommandBase</code> i nie odpalać się na cudzych requestach.</li>
+</ul>
+<p><code>out</code> w <code>&lt;out TResponse&gt;</code> to kowariancja — dziedziczona po <code>IRequest&lt;out TResponse&gt;</code>. Pozwala potraktować <code>IQuery&lt;TicketDto&gt;</code> jako <code>IQuery&lt;object&gt;</code>. Przy bezwynikowym <code>ICommand</code> nie ma czego wariować, stąd brak <code>out</code>.</p>
+<div class="callout warn">
+  <strong>Uwaga na <code>ICommandBase</code> — to jest pytanie na code review.</strong> W tym układzie <code>IQuery</code> <em>też</em> implementuje <code>ICommandBase</code>, więc marker mimo nazwy obejmuje zapytania. Każdy behavior ograniczony <code>where TRequest : ICommandBase</code> odpali się także na <code>GET</code>. Dla walidacji to dobrze (chcemy walidować i komendy, i zapytania). Dla behaviora otwierającego transakcję albo piszącego wpis audytowy — katastrofa. Nazwa <code>IApplicationRequest</code> mówiłaby prawdę; <code>ICommandBase</code> kłamie. Zapytaj u siebie, czy to świadome.
+</div>
+
+<h2>Krok 3 — <code>Unit</code> odchodzi</h2>
+<p>Do MediatR 11 bezwynikowy request był w rzeczywistości <code>IRequest&lt;Unit&gt;</code> i handler zwracał <code>Task&lt;Unit&gt;</code> — dokładnie to, co napisaliśmy sami w <a href="0007-bledy-problemdetails.html">lekcji 0007</a>. <strong>Od wersji 12 jest osobna ścieżka</strong>: <code>IRequest : IBaseRequest</code>, a <code>IRequestHandler&lt;in TRequest&gt;</code> zwraca zwykłe <code>Task</code>. Dlatego dwie komendy chudną:</p>
+<pre><code>public record UpdateTicketCommand(int Id, string Title, string Priority) : ICommand&lt;Unit&gt;;
+public record UpdateTicketCommand(int Id, string Title, string Priority) : ICommand;</code></pre>
+<p class="filename">Features/Tickets/Commands/UpdateTicket/UpdateTicketHandler.cs</p>
+<pre><code>public class UpdateTicketHandler(ITicketStore store) : ICommandHandler&lt;UpdateTicketCommand&gt;
+{
+    public async Task Handle(UpdateTicketCommand command, CancellationToken cancellationToken)
+    {
+        if (!await store.UpdateAsync(command.Id, command.Title, command.Priority, cancellationToken))
+        {
+            throw new DomainException(TicketErrors.NotFound(command.Id));
+        }
+    }
+}</code></pre>
+<p>Zniknęło <code>Task&lt;Unit&gt;</code>, zniknęło <code>return Unit.Value;</code>, zniknął plik <code>Common/Unit.cs</code>. To jest ta różnica, o którą pytałeś przy własnym <code>ISender</code>: przeciążenia bez wyniku nie dało się dołożyć w kilku linijkach, bo wymagało <em>drugiej hierarchii</em> — markera, handlera, gałęzi w dispatcherze, metody w dekoratorze. Biblioteka zrobiła to raz u siebie.</p>
+<div class="callout">
+  <strong>Dwie zmiany w sygnaturze handlera, obie wymuszone.</strong> <code>HandleAsync</code> → <code>Handle</code>, bo tak nazywa się metoda w <code>IRequestHandler</code>. I znika <code>= default</code> przy <code>CancellationToken</code> — interfejs deklaruje parametr bez wartości domyślnej.
+</div>
+
+<h2>Krok 4 — dekorator staje się behaviorem</h2>
+<p class="filename">Common/Validation/ValidationBehavior.cs</p>
+<pre><code>public class ValidationBehavior&lt;TRequest, TResponse&gt;(IEnumerable&lt;IValidator&lt;TRequest&gt;&gt; validators)
+    : IPipelineBehavior&lt;TRequest, TResponse&gt;
+    where TRequest : ICommandBase
+{
+    public async Task&lt;TResponse&gt; Handle(
+        TRequest request,
+        RequestHandlerDelegate&lt;TResponse&gt; next,
+        CancellationToken cancellationToken)
+    {
+        var context = new ValidationContext&lt;TRequest&gt;(request);
+        var failures = new List&lt;ValidationFailure&gt;();
+
+        foreach (var validator in validators)
+        {
+            var result = await validator.ValidateAsync(context, cancellationToken);
+            failures.AddRange(result.Errors);
+        }
+
+        if (failures.Count &gt; 0)
+        {
+            throw new ValidationException(failures);
+        }
+
+        return await next(cancellationToken);
+    }
+}</code></pre>
+<p>Porównaj z <code>ValidationSender</code> z lekcji 0008 — logika jest ta sama, ale trzy rzeczy zrobiły się prostsze:</p>
+<table>
+  <thead><tr><th>Dekorator (0008)</th><th>Behavior (0010)</th></tr></thead>
+  <tbody>
+    <tr><td>dwie metody <code>Send</code> (command i query), obie wołające <code>ValidateAsync</code></td><td>jedna metoda <code>Handle</code></td></tr>
+    <tr><td><code>typeof(IValidator&lt;&gt;).MakeGenericType(...)</code> + <code>GetServices</code></td><td><code>IEnumerable&lt;IValidator&lt;TRequest&gt;&gt;</code> wstrzyknięte przez konstruktor — <strong>bez refleksji</strong></td></tr>
+    <tr><td><code>ValidationContext&lt;object&gt;</code></td><td><code>ValidationContext&lt;TRequest&gt;</code> — typ znany</td></tr>
+    <tr><td>opakowanie <code>ISender</code>, więc kolejność = kolejność rejestracji dekoratorów</td><td><code>next(ct)</code> = następne ogniwo; kolejność = kolejność <code>AddOpenBehavior</code></td></tr>
+  </tbody>
+</table>
+<p><code>IPipelineBehavior</code> jest generyczny po <em>obu</em> parametrach, więc jedna klasa obsługuje wszystkie requesty. Constraint <code>where TRequest : ICommandBase</code> zawęża to do naszych.</p>
+<div class="callout analogy">
+  <strong>To jest middleware, tylko w innym miejscu.</strong> <code>app.UseXxx()</code> opakowuje żądanie HTTP; <code>IPipelineBehavior</code> opakowuje command. Ten sam kształt (<code>next</code> w środku), inny poziom: middleware widzi ścieżkę i nagłówki, behavior widzi typ komendy i jej pola.
+</div>
+
+<h2>Krok 5 — rejestracja</h2>
+<p class="filename">Common/CommonServices.cs</p>
+<pre><code>public static IServiceCollection AddDispatcher(this IServiceCollection services)
+{
+    services.AddMediatR(configuration =&gt;
+    {
+        configuration.RegisterServicesFromAssemblyContaining&lt;Program&gt;();
+        configuration.AddOpenBehavior(typeof(ValidationBehavior&lt;,&gt;));
+    });
+
+    return services;
+}</code></pre>
+<p>I w <code>TicketsFeature.AddTickets</code> <strong>znika sześć linii</strong> — po jednej na handler:</p>
+<pre><code>services.AddScoped&lt;ICommandHandler&lt;CreateTicketCommand, TicketDto&gt;, CreateTicketHandler&gt;();
+services.AddScoped&lt;IQueryHandler&lt;GetTicketQuery, TicketDto&gt;, GetTicketHandler&gt;();
+</code></pre>
+<p>Zostaje tylko to, czego MediatR nie zna: <code>ITicketStore</code> i <code>TicketMetrics</code>. To jest ta „cena”, o której mówiła lekcja 0006 — zapomniana rejestracja handlera dawała 500 przy pierwszym żądaniu. Skan assembly płaci ją za ciebie: nowy handler działa od razu po zapisaniu pliku.</p>
+<p><code>typeof(ValidationBehavior&lt;,&gt;)</code> to <em>otwarty typ generyczny</em> z lekcji 0006 — piszesz klasę raz, MediatR domyka parametry osobno dla każdego requestu.</p>
+
+<h2>Sprawdź, że działa</h2>
+<pre><code>cd project/Helpdesk
+dotnet run</code></pre>
+<table>
+  <thead><tr><th>Żądanie</th><th>Status</th><th>Co potwierdza</th></tr></thead>
+  <tbody>
+    <tr><td><code>GET /tickets</code></td><td>200</td><td>query przez MediatR</td></tr>
+    <tr><td><code>POST</code> poprawny</td><td>201</td><td>command z wynikiem</td></tr>
+    <tr><td><code>POST</code> z tym samym tytułem</td><td>409</td><td><code>DomainException</code> przechodzi przez pipeline nietknięty</td></tr>
+    <tr><td><code>POST</code> <code>{"title":"","priority":"urgent"}</code></td><td>400</td><td>behavior łapie komendę <strong>z</strong> wynikiem</td></tr>
+    <tr><td><code>PUT /tickets/1</code> <code>{"title":"","priority":"urgent"}</code></td><td><strong>400</strong></td><td>behavior łapie komendę <strong>bez</strong> wyniku — to był najważniejszy test</td></tr>
+    <tr><td><code>PUT /tickets/1</code> poprawny</td><td>204</td><td>bezwynikowa ścieżka <code>Task</code></td></tr>
+    <tr><td><code>PUT /tickets/99</code></td><td>404</td><td>—</td></tr>
+    <tr><td><code>DELETE</code>, potem drugi raz</td><td>204, 404</td><td>—</td></tr>
+    <tr><td><code>GET /diagnostics/boom</code></td><td>500</td><td>fallback z lekcji 0007 nietknięty</td></tr>
+  </tbody>
+</table>
+<div class="callout">
+  <strong>Wiersz z <code>PUT</code> i pustym tytułem jest tu najważniejszy.</strong> Komenda bezwynikowa nie ma <code>TResponse</code>, więc pytanie brzmiało, czy <code>IPipelineBehavior&lt;TRequest, TResponse&gt;</code> w ogóle się dla niej odpali. Odpala się — wewnątrz MediatR bezwynikowa ścieżka nadal przechodzi przez pipeline z <code>Unit</code> jako <code>TResponse</code>. <code>Unit</code> nie zniknął z biblioteki; zniknął z <em>twojego</em> kodu.
+</div>
+
+<h2>Błędy, które zobaczysz po drodze</h2>
+<p>Migracja nie kompiluje się w połowie — to normalne. Trzy komunikaty, każdy mówi dokładnie, co zrobić:</p>
+<table>
+  <thead><tr><th>Komunikat</th><th>Znaczenie</th></tr></thead>
+  <tbody>
+    <tr><td><code>CS0246: nie można znaleźć typu 'ISender'</code></td><td>endpoint importuje <code>Helpdesk.Common</code>; zamień na <code>using MediatR;</code></td></tr>
+    <tr><td><code>CS0246: nie można znaleźć typu 'Unit'</code></td><td>komenda albo handler nadal używa skasowanego <code>Common/Unit.cs</code></td></tr>
+    <tr><td><code>CS0535: nie implementuje 'IRequestHandler&lt;…&gt;.Handle(…)'</code></td><td>handler ma jeszcze <code>HandleAsync</code> albo <code>CancellationToken … = default</code></td></tr>
+  </tbody>
+</table>
+
+<h2>Sprawdź się</h2>
+
+<div class="quiz" data-answer="2">
+  <div class="q">Po co własne <code>ICommand</code>, skoro MediatR ma <code>IRequest</code>?</div>
+  <button class="opt">Bo <code>IRequest</code> nie działa z rejestracją przez skan assembly</button>
+  <button class="opt">Bo bez tego nie da się wpiąć żadnego pipeline behavior do MediatR</button>
+  <button class="opt">Dla intencji w nazwie i constraintów, których <code>IRequest</code> nie ma</button>
+  <div class="why">MediatR działa bez tej warstwy. Kupujesz nią rozróżnienie command/query (którego biblioteka nie zna) oraz <code>where TCommand : ICommand&lt;TResponse&gt;</code> — kompilator nie pozwoli wtedy pomylić handlera komendy z handlerem zapytania.</div>
+</div>
+
+<div class="quiz" data-answer="1">
+  <div class="q">Dlaczego z projektu zniknął <code>Unit</code>?</div>
+  <button class="opt">Bo pipeline behavior nie potrafi obsłużyć typu <code>Unit</code> jako odpowiedzi</button>
+  <button class="opt">Bo od MediatR 12 request bez wyniku ma własną ścieżkę z <code>Task</code></button>
+  <button class="opt">Bo rekordy w C# nie mogą implementować interfejsu bez parametru typu</button>
+  <div class="why">Do wersji 11 <code>IRequest</code> był <code>IRequest&lt;Unit&gt;</code>. Od 12 jest <code>IRequest : IBaseRequest</code> i <code>IRequestHandler&lt;in TRequest&gt;</code> z <code>Task</code>. Wewnątrz biblioteki <code>Unit</code> nadal istnieje — po prostu nie dotyka już twojego kodu.</div>
+</div>
+
+<div class="quiz" data-answer="0">
+  <div class="q">Co zmienia <code>where TRequest : ICommandBase</code> w behaviorze?</div>
+  <button class="opt">Zawęża go do naszych requestów, ale obejmuje też zapytania</button>
+  <button class="opt">Ogranicza go wyłącznie do komend, bo zapytania nie są bazowe</button>
+  <button class="opt">Wymusza kolejność, w której behavior odpala się przed innymi</button>
+  <div class="why">Nazwa myli. <code>IQuery</code> też dziedziczy po <code>ICommandBase</code>, więc constraint mówi „nasze requesty”, nie „komendy”. Dla walidacji to pożądane; dla behaviora transakcyjnego byłoby błędem.</div>
+</div>
+
+<div class="quiz" data-answer="2">
+  <div class="q">Co zastąpiło sześć linii <code>AddScoped</code> dla handlerów?</div>
+  <button class="opt">Atrybut na klasie handlera, który MediatR czyta w czasie startu</button>
+  <button class="opt">Rejestracja przez <code>AddOpenBehavior</code> przekazane do konfiguracji</button>
+  <button class="opt">Skan assembly przez <code>RegisterServicesFromAssemblyContaining</code></button>
+  <div class="why"><code>AddOpenBehavior</code> rejestruje pipeline, nie handlery. Handlery znajduje skan assembly — ten sam wzorzec co <code>AddValidatorsFromAssemblyContaining</code> i <code>ApplyConfigurationsFromAssembly</code>.</div>
+</div>
+
+<div class="task">
+  <h3>Zadanie</h3>
+  <ol>
+    <li>Uruchom API i przejdź całą tabelę weryfikacyjną. Zwróć szczególną uwagę na <code>PUT</code> z pustym tytułem — <strong>400</strong>, nie 204.</li>
+    <li>Znajdź w konsoli ostrzeżenie o licencji. Przeczytaj je w całości.</li>
+    <li><code>git log -p -- project/Helpdesk/Common</code> — zobacz, że skasowaliśmy <code>ISender.cs</code>, <code>Sender.cs</code> i <code>Unit.cs</code>, a endpointy zmieniły tylko <code>using</code>.</li>
+    <li>Zepsuj celowo: usuń <code>configuration.AddOpenBehavior(typeof(ValidationBehavior&lt;,&gt;));</code> i powtórz <code>POST</code> z pustym tytułem. Dostaniesz <strong>201</strong> z pustym tytułem — ta sama cicha awaria co w lekcji 0008, tylko przełącznik jest gdzie indziej. Przywróć linię.</li>
+    <li>Zepsuj celowo drugi raz: zmień w handlerze <code>Handle</code> z powrotem na <code>HandleAsync</code>. Przeczytaj <code>CS0535</code> i zauważ, że mówi dokładnie, jakiej sygnatury brakuje.</li>
+    <li>Otwórz firmowe repo i porównaj ich <code>Cqrs</code>-owy plik z naszym. Wypisz różnice — jeśli jakieś są, to są ciekawsze niż podobieństwa.</li>
+  </ol>
+  <div class="check">
+    <label><input type="checkbox" id="c1"> Umiem powiedzieć, co dokładnie robi warstwa <code>ICommand</code>/<code>IQuery</code> nad <code>IRequest</code></label>
+    <label><input type="checkbox" id="c2"> Wiem, czemu <code>Unit</code> był potrzebny u nas, a w MediatR 12+ nie jest</label>
+    <label><input type="checkbox" id="c3"> Rozumiem <code>IPipelineBehavior</code> i wiem, gdzie w nim jest <code>next</code></label>
+    <label><input type="checkbox" id="c4"> Widziałem, że <code>PUT</code> z pustym tytułem daje 400 mimo braku <code>TResponse</code></label>
+    <label><input type="checkbox" id="c5"> Wiem, co oznacza ostrzeżenie o licencji i o co zapytać w zespole</label>
+    <label><input type="checkbox" id="c6"> Umiem wskazać ryzyko w <code>ICommandBase</code> obejmującym zapytania</label>
+  </div>
+</div>
+
+<h2>Zapamiętaj bez zaglądania</h2>
+<details class="recall">
+  <summary>Jak nazywa się handler w MediatR i czym różni się od naszego z lekcji 0006?</summary>
+  <p><code>IRequestHandler&lt;TRequest, TResponse&gt;</code> z metodą <code>Handle(request, cancellationToken)</code> — bez <code>= default</code>. Wersja bezwynikowa: <code>IRequestHandler&lt;in TRequest&gt;</code> z <code>Task Handle(...)</code>. Nasze <code>ICommandHandler</code> / <code>IQueryHandler</code> tylko po nich dziedziczą i dokładają constraint.</p>
+</details>
+<details class="recall">
+  <summary>Gdzie wpina się walidację i jak przekazać sterowanie dalej?</summary>
+  <p><code>IPipelineBehavior&lt;TRequest, TResponse&gt;</code>, rejestrowany przez <code>cfg.AddOpenBehavior(typeof(ValidationBehavior&lt;,&gt;))</code>. Dalej: <code>return await next(cancellationToken);</code>. Nic nie wołasz — brak <code>next</code> oznacza przerwanie łańcucha.</p>
+</details>
+<details class="recall">
+  <summary>Co dokładnie robi <code>RegisterServicesFromAssemblyContaining&lt;Program&gt;()</code>?</summary>
+  <p>Skanuje assembly i rejestruje w DI każdą klasę implementującą <code>IRequestHandler</code> (oraz <code>INotificationHandler</code>). Zastępuje ręczne <code>AddScoped</code> per handler. Ten sam wzorzec co <code>AddValidatorsFromAssemblyContaining</code> z 0008 i <code>ApplyConfigurationsFromAssembly</code> z 0009 — i ta sama cena: usunięcie jednej linii wyłącza wszystko, bez błędu.</p>
+</details>
+
+<h2>Źródło pierwotne</h2>
+<div class="callout source">
+  <a href="https://github.com/luckypennysoftware/mediatr/wiki">MediatR Wiki</a> — <em>Basics</em> i <em>Behaviors</em> (ok. 10 min). Potem <a href="https://github.com/luckypennysoftware/mediatr/wiki/Migration-Guide-11.x-to-12.0">Migration Guide 11.x → 12.0</a>: to ona dokumentuje zniknięcie <code>Unit</code> z bezwynikowych handlerów. Licencja: <a href="https://github.com/luckypennysoftware/mediatr/wiki/License-Key-Configuration">License Key Configuration</a>.
+</div>
+<div class="callout ask">
+  Pytaj, jeśli coś nie klika. Do sprawdzenia w firmowym repo: ile macie behaviorów i w jakiej kolejności są rejestrowane? Czy któryś otwiera transakcję — a jeśli tak, to czy jego constraint nie łapie przypadkiem zapytań?
+</div>
+
+<h2>Co dalej</h2>
+<p>Lekcja 0011: <strong>Clean Architecture</strong> — ten sam Helpdesk rozłożony na warstwy, kierunek zależności i odpowiedź na pytanie, dlaczego w firmowym repo <code>Cqrs.cs</code> leży w innym projekcie niż endpointy.</p>
+
+<nav class="lesson-nav">
+  <a href="0009-ef-core-sqlite.html">← Lekcja 0009</a>
+  <a href="../reference/mediatr.html">Ściąga: MediatR</a>
+  <a href="0006-dispatcher-isender.html">Lekcja 0006: własny dispatcher</a>
+</nav>
+</div>
+</body>
+</html>
