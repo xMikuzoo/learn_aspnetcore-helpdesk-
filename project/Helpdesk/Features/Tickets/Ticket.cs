@@ -1,3 +1,3 @@
 namespace Helpdesk.Features.Tickets;
 
-public record Ticket(int Id, string Title);
+public record Ticket(int Id, string Title, string Priority);

@@ -11,6 +11,10 @@
 (function () {
   function init(quiz, index) {
     var answer = parseInt(quiz.getAttribute("data-answer"), 10);
+    if (isNaN(answer)) {
+      console.error("Quiz bez data-answer — każda odpowiedź wyjdzie zła:", quiz);
+      return;
+    }
     var opts = Array.prototype.slice.call(quiz.querySelectorAll("button.opt"));
     var key = "quiz:" + location.pathname + ":" + (quiz.id || index);
     var attempts = 0;

@@ -4,8 +4,8 @@ public class InMemoryTicketStore : ITicketStore
 {
     private readonly Lock _gate = new();
     private readonly List<Ticket> _tickets = [
-        new  Ticket(1,"Pierwsze zgłoszenie"),
-        new  Ticket(2,"Drugie zgłoszenie!"),
+        new Ticket(1, "Pierwsze zgłoszenie", "normal"),
+        new Ticket(2, "Drugie zgłoszenie!", "high"),
     ];
 
     private int GenerateId() =>
@@ -27,17 +27,17 @@ public class InMemoryTicketStore : ITicketStore
         }
     }
 
-    public Ticket Add(string title)
+    public Ticket Add(string title, string priority)
     {
         lock (_gate)
         {
-            var ticket = new Ticket(GenerateId(), title);
+            var ticket = new Ticket(GenerateId(), title, priority);
             _tickets.Add(ticket);
             return ticket;
         }
     }
 
-    public bool Update(int id, string title)
+    public bool Update(int id, string title, string priority)
     {
         lock (_gate)
         {
@@ -46,7 +46,7 @@ public class InMemoryTicketStore : ITicketStore
             {
                 return false;
             }
-            _tickets[index] = _tickets[index] with { Title = title };
+            _tickets[index] = _tickets[index] with { Title = title, Priority = priority };
             return true;
         }
     }

@@ -163,6 +163,18 @@
   <dt>IExceptionHandler</dt>
   <dd>Interfejs ASP.NET Core z metodą <code>TryHandleAsync</code>. Rejestrowany przez <code>AddExceptionHandler&lt;T&gt;()</code> (jako <strong>Singleton</strong>), uruchamiany przez middleware <code>UseExceptionHandler()</code>. <code>false</code> = „nie mój wyjątek, dawaj następnemu"; <code>true</code> = „obsłużone" i wtedy trzeba napisać całą odpowiedź.</dd>
 
+  <dt>Walidacja <span class="pl">— validation</span></dt>
+  <dd>Sprawdzenie, które da się rozstrzygnąć <strong>wyłącznie na podstawie treści żądania</strong> (pusty tytuł, zły format e-maila). Odpowiedź: 400 ze słownikiem <code>errors</code>, komplet błędów naraz. Przeciwieństwo reguły domenowej, która potrzebuje stanu systemu i wraca jako 404/409 z jednym kodem. Ściąga: <a href="fluentvalidation.html">FluentValidation</a>.</dd>
+
+  <dt>AbstractValidator&lt;T&gt;</dt>
+  <dd>Klasa bazowa walidatora z FluentValidation. Reguły pisze się w konstruktorze: <code>RuleFor(c =&gt; c.Title).NotEmpty()</code>. Z lambdy biblioteka wyciąga nazwę pola do odpowiedzi. W tym kursie walidujemy <em>command</em>, nie request.</dd>
+
+  <dt>Pipeline behavior</dt>
+  <dd>Warstwa opakowująca dispatcher: coś, przez co przechodzi każda komenda przed dotarciem do handlera (walidacja, logowanie, transakcja). U nas dekorator <code>ValidationSender</code> na <code>ISender</code>; w MediatR <code>IPipelineBehavior&lt;TRequest, TResponse&gt;</code> z <code>next()</code>. Odpowiednik middleware z Expressa.</dd>
+
+  <dt>ValidationProblemDetails</dt>
+  <dd><code>ProblemDetails</code> plus pole <code>errors</code>: słownik <code>pole → tablica komunikatów</code>. Tablica, bo jedno pole łamie kilka reguł naraz. Klucze muszą być w camelCase, tak jak pola requestu, inaczej frontend nie podepnie błędu pod input.</dd>
+
   <dt>Result pattern</dt>
   <dd>Alternatywa dla wyjątków: handler zwraca <code>Result&lt;T&gt;</code> — albo wartość, albo <code>Error</code>. Porażka jest widoczna w sygnaturze, ale każda warstwa musi ją obsłużyć. Styl spotykany u Milana Jovanovicia i w firmowym repo.</dd>
 </dl>

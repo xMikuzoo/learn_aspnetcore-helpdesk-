@@ -111,7 +111,7 @@
   <strong>Czego <code>code</code> nie powie:</strong> nasz <code>ErrorType.Forbidden</code> mapuje się na 404 z kodem <code>ticket.not_found</code> — frontend <em>celowo</em> nie odróżni „nie ma” od „nie twoje”. Tak ma być; ta informacja jest wyciekiem.
 </div>
 <div class="callout">
-  <strong>A gdy błędnych pól jest pięć naraz?</strong> Jeden <code>code</code> na odpowiedź wtedy nie wystarczy — formularz rejestracji musi dostać komplet w <em>jednej</em> odpowiedzi, inaczej user poprawia pole, klika, i dostaje błąd o kolejnym. Do tego służy <code>ValidationProblemDetails</code>: ten sam problem+json plus pole <code>errors</code> ze słownikiem <code>pole → tablica komunikatów</code>. Osobna ścieżka, bo <code>DomainException</code> niesie z założenia jeden błąd. Budujemy to w <a href="#">lekcji 0008</a> razem z FluentValidation.
+  <strong>A gdy błędnych pól jest pięć naraz?</strong> Jeden <code>code</code> na odpowiedź wtedy nie wystarczy — formularz rejestracji musi dostać komplet w <em>jednej</em> odpowiedzi, inaczej user poprawia pole, klika, i dostaje błąd o kolejnym. Do tego służy <code>ValidationProblemDetails</code>: ten sam problem+json plus pole <code>errors</code> ze słownikiem <code>pole → tablica komunikatów</code>. Osobna ścieżka, bo <code>DomainException</code> niesie z założenia jeden błąd. Budujemy to w <a href="0008-fluentvalidation-pipeline.html">lekcji 0008</a> razem z FluentValidation.
 </div>
 
 <h2>Krok 1: błąd jako <em>dane</em>, nie jako tekst</h2>
@@ -369,7 +369,7 @@ set in 'UseExceptionHandler()'.</code></pre>
     <tr><td>Debugger „break on exception"</td><td>zatrzymuje się na regułach biznesowych</td><td>cisza</td></tr>
   </tbody>
 </table>
-<p>Reguła praktyczna: <strong>wyjątek do sytuacji naprawdę wyjątkowych, <code>Result</code> do porażek spodziewanych</strong> (walidacja formularza to nie awaria). Duże systemy często mają oba: <code>Result</code> wewnątrz domeny, a <code>IExceptionHandler</code> jako siatka bezpieczeństwa na wszystko, co się przez nią przedostanie. <code>Error</code> i <code>ErrorType</code>, które właśnie napisałeś, przenoszą się do <code>Result</code> jeden do jednego — dlatego zaczęliśmy od nich. Result pattern budujemy w <a href="#">lekcji 0008</a> przy okazji FluentValidation.</p>
+<p>Reguła praktyczna: <strong>wyjątek do sytuacji naprawdę wyjątkowych, <code>Result</code> do porażek spodziewanych</strong> (walidacja formularza to nie awaria). Duże systemy często mają oba: <code>Result</code> wewnątrz domeny, a <code>IExceptionHandler</code> jako siatka bezpieczeństwa na wszystko, co się przez nią przedostanie. <code>Error</code> i <code>ErrorType</code>, które właśnie napisałeś, przenoszą się do <code>Result</code> jeden do jednego — dlatego zaczęliśmy od nich. Do <code>Result</code> wracamy przy okazji EF Core i testów — najpierw, w <a href="0008-fluentvalidation-pipeline.html">lekcji 0008</a>, wyprowadzamy walidację z handlerów.</p>
 
 <div class="quiz" data-answer="1">
   <div class="q">Handler <code>TryHandleAsync</code> zwraca <code>false</code>. Co się dzieje?</div>
@@ -451,7 +451,7 @@ set in 'UseExceptionHandler()'.</code></pre>
 <nav class="lesson-nav">
   <a href="0006-dispatcher-isender.html">← Lekcja 0006</a>
   <a href="../reference/errors-problemdetails.html">Ściąga: Błędy / ProblemDetails</a>
-  <a href="#">Lekcja 0008 →</a>
+  <a href="0008-fluentvalidation-pipeline.html">Lekcja 0008 →</a>
 </nav>
 </div>
 </body>

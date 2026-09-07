@@ -7,6 +7,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddCurrentUser();
 builder.Services.AddDomainErrors();
 builder.Services.AddDispatcher();
+builder.Services.AddValidation();
 builder.Services.AddTickets();
 builder.Services.AddDiagnostics();
 

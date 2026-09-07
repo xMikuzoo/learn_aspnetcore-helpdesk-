@@ -13,7 +13,7 @@ public static class CreateTicketEndpoint
         ISender sender,
         CancellationToken cancellationToken)
     {
-        var ticket = await sender.Send(new CreateTicketCommand(request.Title), cancellationToken);
+        var ticket = await sender.Send(new CreateTicketCommand(request.Title, request.Priority), cancellationToken);
         return TypedResults.Created($"/tickets/{ticket.Id}", ticket);
     }
 }

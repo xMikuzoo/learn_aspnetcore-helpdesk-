@@ -14,7 +14,7 @@ public static class UpdateTicketEndpoint
         ISender sender,
         CancellationToken cancellationToken)
     {
-        await sender.Send(new UpdateTicketCommand(id, request.Title), cancellationToken);
+        await sender.Send(new UpdateTicketCommand(id, request.Title, request.Priority), cancellationToken);
 
         return TypedResults.NoContent();
     }

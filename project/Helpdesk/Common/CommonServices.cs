@@ -1,4 +1,6 @@
+using FluentValidation;
 using Helpdesk.Common.Errors;
+using Helpdesk.Common.Validation;
 
 namespace Helpdesk.Common;
 
@@ -14,7 +16,15 @@ public static class CommonServices
 
     public static IServiceCollection AddDispatcher(this IServiceCollection services)
     {
-        services.AddScoped<ISender, Sender>();
+        services.AddScoped<Sender>();
+        services.AddScoped<ISender, ValidationSender>();
+
+        return services;
+    }
+
+    public static IServiceCollection AddValidation(this IServiceCollection services)
+    {
+        services.AddValidatorsFromAssemblyContaining<Program>();
 
         return services;
     }
@@ -22,6 +32,7 @@ public static class CommonServices
     public static IServiceCollection AddDomainErrors(this IServiceCollection services)
     {
         services.AddProblemDetails();
+        services.AddExceptionHandler<ValidationExceptionHandler>();
         services.AddExceptionHandler<DomainExceptionHandler>();
 
         return services;

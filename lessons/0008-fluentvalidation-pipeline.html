@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>0008 · FluentValidation + pipeline behavior — ASP.NET Core dla frontendowca</title>
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/quiz.js" defer></script>
+<script src="../assets/checklist.js" defer></script>
+</head>
+<body>
+<div class="page">
+<header class="lesson-head">
+  <div class="kicker">Lekcja 0008 · ~25 min · projekt Helpdesk</div>
+  <h1>Walidacja: <code>FluentValidation</code> i jedno miejsce, przez które przechodzi każdy command</h1>
+  <p class="subtitle">Cel: wyprowadzić <code>if (string.IsNullOrWhiteSpace(...))</code> z handlera do osobnego walidatora, wpiąć walidację w dispatcher tak, żeby niepoprawny request <em>nie dotarł</em> do handlera, i zwrócić frontendowi komplet błędów w jednej odpowiedzi.</p>
+  <p class="meta">Wymaga: <a href="0006-dispatcher-isender.html">lekcji 0006</a> (<code>ISender</code>) i <a href="0007-bledy-problemdetails.html">0007</a> (<code>ProblemDetails</code>). Ściągi: <a href="../reference/fluentvalidation.html">FluentValidation</a>, <a href="../reference/curl-bash.html">curl</a>.</p>
+</header>
+
+<h2>Zanim zaczniemy: jak strzelać w API curlem</h2>
+<p>Cała ta lekcja to sprawdzanie, co API odpowiada na zepsute żądania. Poniżej komendy do skopiowania — <strong>sprawdzone w twoim Git Bashu</strong> (curl 8.16.0, Windows 11). Apostrofy wokół JSON-a załatwiają cudzysłowy i spacje; backslash <code>\</code> na końcu linii łamie długą komendę.</p>
+
+<p class="filename">POST — utworzenie zgłoszenia</p>
+<pre><code>curl -s -i -X POST http://localhost:5006/tickets \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Drukarka nie drukuje","priority":"high"}'</code></pre>
+
+<p class="filename">PUT — podmiana zgłoszenia numer 1</p>
+<pre><code>curl -s -i -X PUT http://localhost:5006/tickets/1 \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Poprawiony tytul","priority":"low"}'</code></pre>
+
+<p class="filename">DELETE — usunięcie zgłoszenia numer 2</p>
+<pre><code>curl -s -i -X DELETE http://localhost:5006/tickets/2</code></pre>
+
+<p class="filename">GET — pojedyncze zgłoszenie i cała lista</p>
+<pre><code>curl -s http://localhost:5006/tickets/1
+curl -s http://localhost:5006/tickets</code></pre>
+
+<p class="filename">Ciało, a pod nim sam kod statusu — najwygodniejsza forma na tę lekcję</p>
+<pre><code>curl -s -w "\n=&gt; %{http_code}\n" http://localhost:5006/tickets/99</code></pre>
+
+<table>
+  <thead><tr><th>Flaga</th><th>Znaczenie</th></tr></thead>
+  <tbody>
+    <tr><td><code>-X POST</code></td><td>metoda HTTP; bez tego curl robi GET (albo POST, gdy jest <code>-d</code>)</td></tr>
+    <tr><td><code>-H "..."</code></td><td>nagłówek; bez <code>Content-Type</code> API nie sparsuje ciała (415)</td></tr>
+    <tr><td><code>-d '...'</code></td><td>ciało żądania (<em>data</em>)</td></tr>
+    <tr><td><code>-i</code></td><td>pokaż nagłówki odpowiedzi razem z ciałem — tu widać status</td></tr>
+    <tr><td><code>-s</code></td><td>bez paska postępu</td></tr>
+    <tr><td><code>-w "\n=&gt; %{http_code}\n"</code></td><td>dopisz kod statusu pod ciałem odpowiedzi</td></tr>
+    <tr><td><code>-o /dev/null</code></td><td>wyrzuć ciało — zostaje sam status</td></tr>
+  </tbody>
+</table>
+<div class="callout warn">
+  <strong>Jedyna pułapka na Windowsie: polskie znaki w <code>-d</code>.</strong> Git Bash przekazuje argumenty do <code>curl</code> przez stronę kodową Windows i UTF-8 się po drodze psuje — <code>{"title":"Poprawiony tytuł"}</code> daje <strong>500</strong> i <code>Cannot transcode invalid UTF-8 JSON text</code> w logu. Spacje są w porządku, problem robią tylko <code>ą ć ę ł ń ó ś ź ż</code>. Wtedy ciało idzie z pliku:
+  <pre><code>cat &gt; body.json &lt;&lt;'JSON'
+{"title":"Zgłoszenie z polskimi znakami: ąćęłńóśźż","priority":"normal"}
+JSON
+curl -s -i -X POST http://localhost:5006/tickets -H "Content-Type: application/json" --data-binary @body.json</code></pre>
+</div>
+
+<h2>Problem: walidacja rozlana po handlerach</h2>
+<p>Po lekcji 0007 handler wygląda tak:</p>
+<pre><code><span class="kw">public</span> <span class="ty">Task</span>&lt;<span class="ty">TicketDto</span>&gt; HandleAsync(<span class="ty">CreateTicketCommand</span> command, <span class="ty">CancellationToken</span> ct = <span class="kw">default</span>)
+{
+    <span class="kw">if</span> (<span class="kw">string</span>.IsNullOrWhiteSpace(command.Title))
+    {
+        <span class="kw">throw new</span> <span class="ty">DomainException</span>(<span class="ty">TicketErrors</span>.EmptyTitle);
+    }
+
+    <span class="kw">var</span> ticket = store.Add(command.Title);
+    ...
+}</code></pre>
+<p>Trzy rzeczy są tu nie tak:</p>
+<table>
+  <thead><tr><th>Objaw</th><th>Konsekwencja</th></tr></thead>
+  <tbody>
+    <tr><td>ten sam <code>if</code> jest w <code>CreateTicketHandler</code> i w <code>UpdateTicketHandler</code></td><td>trzecia komenda z tytułem = trzecia kopia; jedna zapomniana = dziura</td></tr>
+    <tr><td>handler zatrzymuje się na <strong>pierwszym</strong> błędzie</td><td>formularz z pięcioma złymi polami poprawiasz pięć razy, klikając „zapisz” po każdym</td></tr>
+    <tr><td>reguła „tytuł niepusty” jest wymieszana z logiką zapisu</td><td>nie da się jej odczytać ani przetestować bez uruchamiania handlera</td></tr>
+  </tbody>
+</table>
+<div class="callout analogy">
+  We frontendzie masz to samo rozróżnienie: <code>zod</code>/<code>vee-validate</code> sprawdza kształt formularza <em>przed</em> wysłaniem, a store dopiero wykonuje akcję. Walidator na backendzie to ten sam pomysł — z tą różnicą, że backendowi <strong>nie wolno</strong> zakładać, że frontend już sprawdził.
+</div>
+
+<h2>Krok 0: zgłoszenie dostaje drugie pole</h2>
+<p>Walidacja jednego pola to słaba demonstracja — nie widać, jak wygląda odpowiedź z kilkoma błędami naraz. Dlatego zgłoszenie ma teraz <strong>priorytet</strong>:</p>
+<p class="filename">project/Helpdesk/Features/Tickets/Ticket.cs · TicketDto.cs · TicketPriority.cs</p>
+<pre><code><span class="kw">public record</span> <span class="ty">Ticket</span>(<span class="kw">int</span> Id, <span class="kw">string</span> Title, <span class="kw">string</span> Priority);
+
+<span class="kw">public record</span> <span class="ty">TicketDto</span>(<span class="kw">int</span> Id, <span class="kw">string</span> Title, <span class="kw">string</span> Priority)
+{
+    <span class="kw">public static</span> <span class="ty">TicketDto</span> From(<span class="ty">Ticket</span> ticket) =&gt; <span class="kw">new</span>(ticket.Id, ticket.Title, ticket.Priority);
+}
+
+<span class="kw">public static class</span> <span class="ty">TicketPriority</span>
+{
+    <span class="kw">public static readonly</span> <span class="kw">string</span>[] All = [<span class="str">"low"</span>, <span class="str">"normal"</span>, <span class="str">"high"</span>];
+
+    <span class="kw">public static bool</span> IsAllowed(<span class="kw">string</span>? value) =&gt; All.Contains(value);
+}</code></pre>
+<p>Za tym idzie kaskada, którą znasz już z lekcji 0007: <code>ITicketStore.Add(title, priority)</code>, <code>Update(id, title, priority)</code>, oba requesty i oba commandy. Nic nowego — czysta mechanika, zerknij w <code>git diff</code>.</p>
+
+<h2>Krok 1: pakiet</h2>
+<pre><code>cd project/Helpdesk
+dotnet add package FluentValidation.DependencyInjectionExtensions</code></pre>
+<p>Ten pakiet ciągnie za sobą <code>FluentValidation</code> i dokłada metody rejestrujące walidatory w kontenerze DI. Wersja użyta w kursie: <strong>12.1.1</strong>.</p>
+<div class="callout warn">
+  Jest też pakiet <code>FluentValidation.AspNetCore</code> — <strong>nie instaluj go</strong>. Jest oficjalnie porzucony; wpinał walidację w model binding MVC, czyli w mechanizm, którego przy minimal API i tak nie używamy.
+</div>
+
+<h2>Krok 2: walidator jako osobny plik w slice’ie</h2>
+<p class="filename">project/Helpdesk/Features/Tickets/Commands/CreateTicket/CreateTicketValidator.cs</p>
+<pre><code><span class="kw">using</span> FluentValidation;
+
+<span class="kw">namespace</span> Helpdesk.Features.Tickets.Commands.CreateTicket;
+
+<span class="kw">public class</span> <span class="ty">CreateTicketValidator</span> : <span class="ty">AbstractValidator</span>&lt;<span class="ty">CreateTicketCommand</span>&gt;
+{
+    <span class="kw">public</span> CreateTicketValidator()
+    {
+        RuleFor(command =&gt; command.Title)
+            .NotEmpty().WithMessage(<span class="str">"Tytuł zgłoszenia nie może być pusty."</span>)
+            .MaximumLength(100).WithMessage(<span class="str">"Tytuł zgłoszenia może mieć najwyżej 100 znaków."</span>);
+
+        RuleFor(command =&gt; command.Priority)
+            .NotEmpty().WithMessage(<span class="str">"Priorytet jest wymagany."</span>)
+            .Must(<span class="ty">TicketPriority</span>.IsAllowed).WithMessage(<span class="str">"Priorytet musi być jedną z wartości: low, normal, high."</span>);
+    }
+}</code></pre>
+<table>
+  <thead><tr><th>Element</th><th>Co robi</th></tr></thead>
+  <tbody>
+    <tr><td><code>AbstractValidator&lt;T&gt;</code></td><td>klasa bazowa; <code>T</code> to typ walidowanej wiadomości — tu <em>command</em>, nie request</td></tr>
+    <tr><td><code>RuleFor(c =&gt; c.Title)</code></td><td>lambda wskazuje pole; z niej FluentValidation <strong>wyciąga nazwę</strong> <code>"Title"</code> do odpowiedzi</td></tr>
+    <tr><td><code>.NotEmpty()</code>, <code>.MaximumLength(n)</code></td><td>gotowe reguły — jest ich kilkadziesiąt (<code>EmailAddress</code>, <code>InclusiveBetween</code>, <code>Matches</code>…)</td></tr>
+    <tr><td><code>.Must(predykat)</code></td><td>furtka na własną regułę: dowolna funkcja zwracająca <code>bool</code></td></tr>
+    <tr><td><code>.WithMessage(...)</code></td><td>komunikat dla człowieka; bez tego dostajesz angielski tekst domyślny</td></tr>
+  </tbody>
+</table>
+<div class="callout">
+  <strong>Walidujemy command, nie request.</strong> Request to kształt JSON-a z sieci, command to intencja, którą rozumie domena — i to command trafia do dispatchera. Reguła powieszona na commandzie zadziała dla <em>wszystkich</em> wywołań, także tych spoza HTTP (job w tle, test, inny endpoint).
+</div>
+<div class="callout warn">
+  Reguły w jednym łańcuchu domyślnie <strong>nie zatrzymują się</strong> na pierwszym niepowodzeniu. Pusty priorytet łamie <code>NotEmpty</code> <em>i</em> <code>Must</code> — dostaniesz dwa komunikaty dla jednego pola (sprawdzone niżej, w tabeli weryfikacyjnej). Jeśli chcesz przerwać po pierwszym: <code>.Cascade(CascadeMode.Stop)</code>.
+</div>
+
+<h2>Krok 3: pipeline behavior, czyli dekorator dispatchera</h2>
+<p>Walidator sam się nie uruchomi — ktoś musi go zawołać. Chcemy <em>jednego</em> takiego miejsca dla wszystkich komend. To miejsce już mamy: <code>ISender</code> z lekcji 0006.</p>
+<p class="filename">project/Helpdesk/Common/Validation/ValidationSender.cs</p>
+<pre><code><span class="kw">using</span> FluentValidation;
+<span class="kw">using</span> FluentValidation.Results;
+
+<span class="kw">namespace</span> Helpdesk.Common.Validation;
+
+<span class="cm">/// &lt;summary&gt;Dekorator ISender: uruchamia walidatory wiadomości przed przekazaniem jej do handlera.&lt;/summary&gt;</span>
+<span class="kw">public class</span> <span class="ty">ValidationSender</span>(<span class="ty">Sender</span> inner, <span class="ty">IServiceProvider</span> provider) : <span class="ty">ISender</span>
+{
+    <span class="kw">public async</span> <span class="ty">Task</span>&lt;TResult&gt; Send&lt;TResult&gt;(<span class="ty">ICommand</span>&lt;TResult&gt; command, <span class="ty">CancellationToken</span> ct = <span class="kw">default</span>)
+    {
+        <span class="kw">await</span> ValidateAsync(command, ct);
+
+        <span class="kw">return await</span> inner.Send(command, ct);
+    }
+
+    <span class="kw">public async</span> <span class="ty">Task</span>&lt;TResult&gt; Send&lt;TResult&gt;(<span class="ty">IQuery</span>&lt;TResult&gt; query, <span class="ty">CancellationToken</span> ct = <span class="kw">default</span>)
+    {
+        <span class="kw">await</span> ValidateAsync(query, ct);
+
+        <span class="kw">return await</span> inner.Send(query, ct);
+    }
+
+    <span class="kw">private async</span> <span class="ty">Task</span> ValidateAsync(<span class="kw">object</span> message, <span class="ty">CancellationToken</span> ct)
+    {
+        <span class="kw">var</span> validatorType = <span class="kw">typeof</span>(<span class="ty">IValidator</span>&lt;&gt;).MakeGenericType(message.GetType());
+        <span class="kw">var</span> validators = provider.GetServices(validatorType).Cast&lt;<span class="ty">IValidator</span>&gt;();
+        <span class="kw">var</span> context = <span class="kw">new</span> <span class="ty">ValidationContext</span>&lt;<span class="kw">object</span>&gt;(message);
+
+        <span class="kw">var</span> failures = <span class="kw">new</span> <span class="ty">List</span>&lt;<span class="ty">ValidationFailure</span>&gt;();
+
+        <span class="kw">foreach</span> (<span class="kw">var</span> validator <span class="kw">in</span> validators)
+        {
+            <span class="kw">var</span> result = <span class="kw">await</span> validator.ValidateAsync(context, ct);
+            failures.AddRange(result.Errors);
+        }
+
+        <span class="kw">if</span> (failures.Count &gt; 0)
+        {
+            <span class="kw">throw new</span> <span class="ty">ValidationException</span>(failures);
+        }
+    }
+}</code></pre>
+<table>
+  <thead><tr><th>Fragment</th><th>Po co</th></tr></thead>
+  <tbody>
+    <tr><td><code>(Sender inner, ...)</code></td><td><strong>dekorator</strong>: klasa implementuje <code>ISender</code> i opakowuje prawdziwy <code>Sender</code>. Endpointy nadal wstrzykują <code>ISender</code> i o niczym nie wiedzą.</td></tr>
+    <tr><td><code>MakeGenericType(message.GetType())</code></td><td>z <code>IValidator&lt;&gt;</code> robi <code>IValidator&lt;CreateTicketCommand&gt;</code> — typ znany dopiero w czasie działania (ten sam trik co w <code>Sender</code>)</td></tr>
+    <tr><td><code>GetServices(...)</code></td><td>liczba mnoga: jedna komenda może mieć kilka walidatorów. Brak walidatora = pusta lista, <strong>nie</strong> wyjątek.</td></tr>
+    <tr><td><code>Cast&lt;IValidator&gt;()</code></td><td>niegeneryczny <code>IValidator</code> ma <code>ValidateAsync(IValidationContext, ct)</code> — dzięki temu nie potrzeba tu <code>dynamic</code></td></tr>
+    <tr><td><code>throw new ValidationException(failures)</code></td><td>wyjątek z pakietu FluentValidation, niosący <strong>komplet</strong> błędów, nie pierwszy z brzegu</td></tr>
+  </tbody>
+</table>
+<div class="callout">
+  <strong>To jest „pipeline behavior”.</strong> W MediatR ta sama rzecz nazywa się <code>IPipelineBehavior&lt;TRequest, TResponse&gt;</code> i ma metodę <code>Handle(request, next, ct)</code>, gdzie <code>next()</code> to nasze <code>inner.Send(...)</code>. Zespół, który mówi „walidacja jest w behaviorze”, ma dokładnie ten kod. Obok zobaczysz behaviory do logowania, transakcji i pomiaru czasu — wszystkie w tym samym miejscu, jedno owinięcie na drugim.
+</div>
+<div class="callout analogy">
+  To ten sam pomysł, co middleware w Express albo interceptor w Axiosie: warstwa, przez którą przechodzi każde żądanie, zanim dojdzie do właściwej obsługi.
+</div>
+
+<h2>Krok 4: <code>ValidationException</code> → jedna odpowiedź z kompletem błędów</h2>
+<p>Rzucony wyjątek trzeba zamienić na JSON. Robimy to dokładnie tak jak w lekcji 0007 — drugim <code>IExceptionHandler</code>.</p>
+<p class="filename">project/Helpdesk/Common/Errors/ValidationExceptionHandler.cs</p>
+<pre><code><span class="kw">public class</span> <span class="ty">ValidationExceptionHandler</span>(<span class="ty">IProblemDetailsService</span> problemDetailsService) : <span class="ty">IExceptionHandler</span>
+{
+    <span class="kw">public async</span> <span class="ty">ValueTask</span>&lt;<span class="kw">bool</span>&gt; TryHandleAsync(<span class="ty">HttpContext</span> httpContext, <span class="ty">Exception</span> exception, <span class="ty">CancellationToken</span> ct)
+    {
+        <span class="kw">if</span> (exception <span class="kw">is not</span> <span class="ty">ValidationException</span> validationException)
+        {
+            <span class="kw">return false</span>;
+        }
+
+        httpContext.Response.StatusCode = <span class="ty">StatusCodes</span>.Status400BadRequest;
+
+        <span class="kw">return await</span> problemDetailsService.TryWriteAsync(<span class="kw">new</span> <span class="ty">ProblemDetailsContext</span>
+        {
+            HttpContext = httpContext,
+            Exception = exception,
+            ProblemDetails =
+            {
+                Title = <span class="str">"Nieprawidłowe żądanie"</span>,
+                Detail = <span class="str">"Popraw zaznaczone pola i wyślij formularz ponownie."</span>,
+                Status = <span class="ty">StatusCodes</span>.Status400BadRequest,
+                Extensions =
+                {
+                    [<span class="str">"code"</span>] = <span class="str">"validation_failed"</span>,
+                    [<span class="str">"errors"</span>] = ToErrorsByField(validationException)
+                }
+            }
+        });
+    }
+
+    <span class="kw">private static</span> <span class="ty">Dictionary</span>&lt;<span class="kw">string</span>, <span class="kw">string</span>[]&gt; ToErrorsByField(<span class="ty">ValidationException</span> exception) =&gt;
+        exception.Errors
+            .GroupBy(failure =&gt; <span class="ty">JsonNamingPolicy</span>.CamelCase.ConvertName(failure.PropertyName))
+            .ToDictionary(group =&gt; group.Key, group =&gt; group.Select(failure =&gt; failure.ErrorMessage).ToArray());
+}</code></pre>
+<p>Efekt — jedno żądanie, komplet błędów (prawdziwa odpowiedź tego API):</p>
+<pre><code>{
+  <span class="str">"type"</span>: <span class="str">"https://tools.ietf.org/html/rfc9110#section-15.5.1"</span>,
+  <span class="str">"title"</span>: <span class="str">"Nieprawidłowe żądanie"</span>,
+  <span class="str">"status"</span>: 400,
+  <span class="str">"detail"</span>: <span class="str">"Popraw zaznaczone pola i wyślij formularz ponownie."</span>,
+  <span class="str">"code"</span>: <span class="str">"validation_failed"</span>,
+  <span class="str">"errors"</span>: {
+    <span class="str">"title"</span>: [<span class="str">"Tytuł zgłoszenia nie może być pusty."</span>],
+    <span class="str">"priority"</span>: [<span class="str">"Priorytet musi być jedną z wartości: low, normal, high."</span>]
+  },
+  <span class="str">"traceId"</span>: <span class="str">"00-017292ff25638835c08bde86bf1cd04f-48db01c1cd190794-00"</span>
+}</code></pre>
+<table>
+  <thead><tr><th>Decyzja</th><th>Dlaczego tak</th></tr></thead>
+  <tbody>
+    <tr><td><code>errors</code> to słownik <code>pole → tablica</code></td><td>bo jedno pole łamie kilka reguł naraz. Front robi <code>errors[field]</code> i ma listę komunikatów pod inputem.</td></tr>
+    <tr><td>w środku tablica <em>stringów</em>, nie obiektów</td><td>to kształt <code>ValidationProblemDetails</code>, który rozumieją Swagger i generatory klientów. Obiekty w środku łamią ten kontrakt.</td></tr>
+    <tr><td><code>JsonNamingPolicy.CamelCase</code></td><td>FluentValidation daje <code>"Title"</code> (nazwa właściwości C#), a frontend wysłał <code>title</code>. Klucze <strong>muszą</strong> pasować do pól requestu, inaczej front nie podepnie błędu pod input.</td></tr>
+    <tr><td>jedno <code>code: validation_failed</code></td><td>błędów jest wiele, kod odpowiedzi jest jeden. Rozróżnienie <em>per pole</em> siedzi w kluczach <code>errors</code>.</td></tr>
+  </tbody>
+</table>
+<div class="callout analogy">
+  Po stronie Vue to jest dokładnie to, czego potrzebuje formularz:
+  <pre><code><span class="kw">if</span> (problem.status === 400 &amp;&amp; problem.errors) {
+  fieldErrors.value = problem.errors;        <span class="cm">// { title: [...], priority: [...] }</span>
+} <span class="kw">else</span> {
+  toast.error(problem.detail);
+}</code></pre>
+</div>
+
+<h2>Krok 5: rejestracja</h2>
+<p class="filename">project/Helpdesk/Common/CommonServices.cs</p>
+<pre><code><span class="kw">public static</span> <span class="ty">IServiceCollection</span> AddDispatcher(<span class="kw">this</span> <span class="ty">IServiceCollection</span> services)
+{
+    services.AddScoped&lt;<span class="ty">Sender</span>&gt;();
+    services.AddScoped&lt;<span class="ty">ISender</span>, <span class="ty">ValidationSender</span>&gt;();
+
+    <span class="kw">return</span> services;
+}
+
+<span class="kw">public static</span> <span class="ty">IServiceCollection</span> AddValidation(<span class="kw">this</span> <span class="ty">IServiceCollection</span> services)
+{
+    services.AddValidatorsFromAssemblyContaining&lt;<span class="ty">Program</span>&gt;();
+
+    <span class="kw">return</span> services;
+}
+
+<span class="kw">public static</span> <span class="ty">IServiceCollection</span> AddDomainErrors(<span class="kw">this</span> <span class="ty">IServiceCollection</span> services)
+{
+    services.AddProblemDetails();
+    services.AddExceptionHandler&lt;<span class="ty">ValidationExceptionHandler</span>&gt;();
+    services.AddExceptionHandler&lt;<span class="ty">DomainExceptionHandler</span>&gt;();
+
+    <span class="kw">return</span> services;
+}</code></pre>
+<table>
+  <thead><tr><th>Linia</th><th>Co się zmieniło</th></tr></thead>
+  <tbody>
+    <tr><td><code>AddScoped&lt;Sender&gt;()</code></td><td>prawdziwy dispatcher rejestruje się teraz <strong>pod własnym typem</strong>, nie pod <code>ISender</code></td></tr>
+    <tr><td><code>AddScoped&lt;ISender, ValidationSender&gt;()</code></td><td>kto prosi o <code>ISender</code>, dostaje dekorator; ten wstrzykuje sobie <code>Sender</code></td></tr>
+    <tr><td><code>AddValidatorsFromAssemblyContaining&lt;Program&gt;()</code></td><td>skanuje całe assembly i rejestruje każdą klasę dziedziczącą po <code>AbstractValidator&lt;&gt;</code> — nowego walidatora <strong>nie trzeba</strong> nigdzie dopisywać</td></tr>
+    <tr><td>dwa <code>AddExceptionHandler</code></td><td>uruchamiają się w kolejności rejestracji; każdy sprawdza typ wyjątku i oddaje pałeczkę przez <code>return false</code></td></tr>
+  </tbody>
+</table>
+<p>W <code>Program.cs</code> dochodzi jedna linia:</p>
+<pre><code>builder.Services.AddDispatcher();
+builder.Services.AddValidation();</code></pre>
+<p>A z handlerów znika <code>if</code> — razem z <code>TicketErrors.EmptyTitle</code>, które przestało mieć użytkownika:</p>
+<pre><code><span class="kw">public</span> <span class="ty">Task</span>&lt;<span class="ty">TicketDto</span>&gt; HandleAsync(<span class="ty">CreateTicketCommand</span> command, <span class="ty">CancellationToken</span> ct = <span class="kw">default</span>)
+{
+    <span class="kw">var</span> ticket = store.Add(command.Title, command.Priority);
+    metrics.RecordCreated(user);
+
+    <span class="kw">return</span> <span class="ty">Task</span>.FromResult(<span class="ty">TicketDto</span>.From(ticket));
+}</code></pre>
+<div class="callout warn">
+  Zwróć uwagę, co <strong>zostało</strong> w <code>UpdateTicketHandler</code>: <code>throw new DomainException(TicketErrors.NotFound(id))</code>. To nie jest walidacja — to reguła, której nie da się sprawdzić bez zajrzenia do bazy.
+</div>
+
+<h2>Walidacja czy reguła domenowa?</h2>
+<p>Pytanie rozstrzygające: <strong>czy da się to stwierdzić, patrząc wyłącznie na treść żądania?</strong></p>
+<table>
+  <thead><tr><th></th><th>Walidacja</th><th>Reguła domenowa</th></tr></thead>
+  <tbody>
+    <tr><td>Skąd wiadomo</td><td>z samego requestu</td><td>ze stanu systemu (baza, inne zgłoszenia)</td></tr>
+    <tr><td>Gdzie mieszka</td><td><code>AbstractValidator</code>, przed handlerem</td><td>wewnątrz handlera</td></tr>
+    <tr><td>Ile błędów naraz</td><td>komplet, w <code>errors</code></td><td>jeden — pierwszy, który wystąpił</td></tr>
+    <tr><td>Status</td><td>400</td><td>404 / 409 / 403</td></tr>
+    <tr><td>Kształt ciała</td><td><code>code: validation_failed</code> + <code>errors</code></td><td>pojedynczy <code>code</code>, bez <code>errors</code></td></tr>
+    <tr><td>Przykład</td><td>pusty tytuł, priorytet spoza listy</td><td>zgłoszenie nie istnieje, e-mail zajęty, zamknięte zgłoszenie nie przyjmuje zmian</td></tr>
+  </tbody>
+</table>
+<div class="callout">
+  Dlatego w formularzu rejestracji „hasła się nie zgadzają” i „zły format e-maila” wracają <strong>razem</strong> w jednym 400, a „ten e-mail jest już zajęty” przychodzi <strong>osobno</strong> jako 409 — do bazy w ogóle nie doszło, dopóki pięć pól było zepsutych.<br><br>
+  Uwaga bezpieczeństwa: przy <em>publicznej</em> rejestracji odpowiedź „e-mail zajęty” pozwala sprawdzać, kto ma konto (<em>user enumeration</em>). Wtedy zwraca się to samo niezależnie od wyniku i rozstrzyga mailem. Ta sama zasada co <code>Forbidden → 404</code> z <a href="0007-bledy-problemdetails.html">lekcji 0007</a>.
+</div>
+
+<h2>Weryfikacja</h2>
+<p>Uruchom API: <code>cd project/Helpdesk</code>, potem <code>dotnet run --urls http://localhost:5006</code>. Wyniki poniżej to prawdziwy output tego projektu.</p>
+<table>
+  <thead><tr><th>Żądanie</th><th>Status</th><th>Ciało</th></tr></thead>
+  <tbody>
+    <tr><td>POST <code>{"title":"Zepsuta-drukarka","priority":"high"}</code></td><td>201</td><td><code>{"id":3,"title":"Zepsuta-drukarka","priority":"high"}</code></td></tr>
+    <tr><td>POST <code>{"title":"","priority":"urgent"}</code></td><td><strong>400</strong></td><td><code>errors: { title: […], priority: […] }</code> — dwa pola, po jednym komunikacie</td></tr>
+    <tr><td>POST <code>{"title":"OK","priority":""}</code></td><td><strong>400</strong></td><td><code>errors: { priority: ["Priorytet jest wymagany.", "Priorytet musi być jedną z…"] }</code> — <strong>dwa</strong> komunikaty na jedno pole</td></tr>
+    <tr><td>POST z tytułem o długości 101</td><td>400</td><td><code>errors: { title: ["Tytuł zgłoszenia może mieć najwyżej 100 znaków."] }</code></td></tr>
+    <tr><td>PUT <code>/tickets/1</code> poprawny</td><td>204</td><td>puste</td></tr>
+    <tr><td>PUT <code>/tickets/99</code> poprawny</td><td>404</td><td><code>code: "ticket.not_found"</code> — reguła domenowa, nie walidacja</td></tr>
+    <tr><td>DELETE <code>/tickets/2</code>, potem raz jeszcze</td><td>204, potem 404</td><td>drugi raz <code>code: "ticket.not_found"</code></td></tr>
+  </tbody>
+</table>
+<p class="filename">komplet komend do wklejenia</p>
+<pre><code>API=http://localhost:5006
+JSON="Content-Type: application/json"
+
+curl -s -w "\n=&gt; %{http_code}\n" -X POST $API/tickets -H "$JSON" -d '{"title":"Zepsuta drukarka","priority":"high"}'
+curl -s -w "\n=&gt; %{http_code}\n" -X POST $API/tickets -H "$JSON" -d '{"title":"","priority":"urgent"}'
+curl -s -w "\n=&gt; %{http_code}\n" -X POST $API/tickets -H "$JSON" -d '{"title":"OK","priority":""}'
+curl -s -w "\n=&gt; %{http_code}\n" -X PUT $API/tickets/1 -H "$JSON" -d '{"title":"Poprawiony","priority":"low"}'
+curl -s -w "\n=&gt; %{http_code}\n" -X PUT $API/tickets/99 -H "$JSON" -d '{"title":"cokolwiek","priority":"low"}'
+curl -s -w "\n=&gt; %{http_code}\n" -X DELETE $API/tickets/2
+curl -s -w "\n=&gt; %{http_code}\n" -X DELETE $API/tickets/2</code></pre>
+
+<h2>Dwa błędy, które warto wywołać celowo</h2>
+<h3>1. Zapomniane <code>AddValidation()</code> — cisza zamiast błędu</h3>
+<p>Usuń <code>builder.Services.AddValidation();</code> z <code>Program.cs</code> i wyślij pusty tytuł:</p>
+<pre><code>{"id":3,"title":"","priority":"urgent"}
+=&gt; 201</code></pre>
+<div class="callout warn">
+  Aplikacja wstaje, nic nie krzyczy, a zgłoszenie bez tytułu i z nieistniejącym priorytetem ląduje w bazie. To najgorszy rodzaj awarii: <code>GetServices</code> zwraca pustą listę, więc <code>ValidationSender</code> uznaje, że nie ma czego walidować. <strong>Dlatego walidacja musi mieć test</strong> — brak walidatora nie objawia się niczym poza przyjętym śmieciem.
+</div>
+
+<h3>2. Zapomniany <code>AddExceptionHandler&lt;ValidationExceptionHandler&gt;()</code></h3>
+<p>Ten sam request bez zarejestrowanego handlera:</p>
+<pre><code>HTTP/1.1 500 Internal Server Error
+Content-Type: application/problem+json
+
+{"type":"…#section-15.6.1","title":"An error occurred while processing your request.","status":500,"traceId":"…"}</code></pre>
+<p>a w konsoli:</p>
+<pre><code>fail: Microsoft.AspNetCore.Diagnostics.ExceptionHandlerMiddleware[1]
+      An unhandled exception has occurred while executing the request.
+      FluentValidation.ValidationException: Validation failed:
+       -- Title: Tytuł zgłoszenia nie może być pusty. Severity: Error
+       -- Priority: Priorytet musi być jedną z wartości: low, normal, high. Severity: Error
+         at Helpdesk.Common.Validation.ValidationSender.ValidateAsync(...)</code></pre>
+<p><code>ValidationException</code> to nie <code>DomainException</code>, więc <code>DomainExceptionHandler</code> zwrócił <code>false</code> i żądanie doleciało do fallbacku — generyczne 500. Frontend widzi awarię serwera zamiast „popraw pola”.</p>
+
+<div class="quiz" data-answer="1">
+  <div class="q">Po co walidować <code>CreateTicketCommand</code>, a nie <code>CreateTicketRequest</code>?</div>
+  <button class="opt">Bo request jest rekordem, a walidator wymaga zwykłej klasy z konstruktorem</button>
+  <button class="opt">Bo przez dispatcher przechodzi command i tylko tam złapiemy wszystkie wywołania</button>
+  <button class="opt">Bo request sprawdził już deserializator JSON, więc walidacja byłaby podwójna</button>
+  <div class="why">Walidacja siedzi w dekoratorze <code>ISender</code>, a przez <code>ISender</code> przechodzą komendy. Gdyby regułę powiesić na requeście, każde wywołanie spoza HTTP (job w tle, test, inny endpoint) ominęłoby ją bez śladu.</div>
+</div>
+
+<div class="quiz" data-answer="0">
+  <div class="q">Czemu w <code>errors</code> pod jednym polem jest tablica, a nie jeden tekst?</div>
+  <button class="opt">Bo jedno pole może naruszyć kilka reguł w tym samym żądaniu</button>
+  <button class="opt">Bo JSON nie pozwala trzymać stringa jako wartości w słowniku</button>
+  <button class="opt">Bo RFC 9457 wymaga tablicy dla każdego własnego rozszerzenia</button>
+  <div class="why">Pusty priorytet łamie naraz <code>NotEmpty</code> i <code>Must</code> — sprawdzone: dwa komunikaty pod kluczem <code>priority</code>. Łańcuch reguł domyślnie nie zatrzymuje się na pierwszym błędzie.</div>
+</div>
+
+<div class="quiz" data-answer="1">
+  <div class="q">„E-mail jest już zajęty” — walidator czy handler?</div>
+  <button class="opt">Walidator, bo to typowy błąd formularza pokazywany pod polem</button>
+  <button class="opt">Handler, bo odpowiedź wymaga zajrzenia do bazy danych</button>
+  <button class="opt">Walidator, bo inaczej nie trafi do słownika <code>errors</code></button>
+  <div class="why">Walidator dostaje wyłącznie treść żądania. Wszystko, co wymaga stanu systemu, to reguła domenowa — <code>DomainException</code> z lekcji 0007, status 409 albo 404, jeden kod błędu.</div>
+</div>
+
+<div class="quiz" data-answer="2">
+  <div class="q">Co się dzieje, gdy komenda nie ma żadnego walidatora?</div>
+  <button class="opt">Kontener rzuca wyjątek przy starcie o braku rejestracji walidatora</button>
+  <button class="opt">Dispatcher zwraca status 400 z pustym słownikiem błędów w ciele</button>
+  <button class="opt">Komenda leci prosto do handlera, bez sprawdzenia czegokolwiek</button>
+  <div class="why"><code>GetServices</code> (liczba mnoga) na brak rejestracji zwraca pustą listę, nie wyjątek. To wygodne — nie każda komenda potrzebuje walidatora — ale oznacza, że zapomniany walidator jest niewidoczny aż do produkcji.</div>
+</div>
+
+<div class="task">
+  <h3>Zadanie</h3>
+  <ol>
+    <li>Uruchom API i przejdź całą tabelę weryfikacyjną komendami wyżej. Zobacz na własne oczy dwa komunikaty pod jednym kluczem <code>priority</code>.</li>
+    <li>Przeczytaj <code>UpdateTicketValidator</code> — te same reguły co przy tworzeniu, słowo w słowo. Uzasadnienie duplikatu niżej.</li>
+    <li>Sprawdź go: <code>PUT /tickets/1</code> z <code>{"title":"","priority":"urgent"}</code> daje <strong>400</strong> ze słownikiem, nie 204.</li>
+    <li>Zepsuj celowo: usuń <code>builder.Services.AddValidation();</code> i powtórz ten sam PUT. Zobacz 204, a potem pusty tytuł w <code>GET /tickets/1</code>. Przywróć linię.</li>
+    <li>Zepsuj celowo drugi raz: zakomentuj <code>services.AddExceptionHandler&lt;ValidationExceptionHandler&gt;();</code> i obejrzyj 500 plus wpis w konsoli.</li>
+    <li><code>git diff project/Helpdesk/Features/Tickets</code> — policz, ile linii walidacji zniknęło z handlerów.</li>
+  </ol>
+  <div class="check">
+    <label><input type="checkbox" id="c1"> Umiem wysłać POST, PUT i DELETE curlem</label>
+    <label><input type="checkbox" id="c2"> Widziałem 400 ze słownikiem <code>errors</code> i dwoma komunikatami na jedno pole</label>
+    <label><input type="checkbox" id="c3"> Umiem uzasadnić, czemu <code>UpdateTicketValidator</code> powtarza reguły zamiast je współdzielić</label>
+    <label><input type="checkbox" id="c4"> Widziałem, że bez <code>AddValidation()</code> API cicho przyjmuje śmieci</label>
+    <label><input type="checkbox" id="c5"> Umiem rozstrzygnąć, czy reguła to walidacja (400), czy reguła domenowa (404/409)</label>
+    <label><input type="checkbox" id="c6"> Wiem, czym jest pipeline behavior i gdzie go szukać w kodzie firmowym</label>
+  </div>
+</div>
+
+<div class="callout">
+  <strong>Dlaczego <code>UpdateTicketValidator</code> to kopia <code>CreateTicketValidator</code></strong><br>
+  Plik: <code>Features/Tickets/Commands/UpdateTicket/UpdateTicketValidator.cs</code>. Te same dwie reguły, ten sam limit 100 znaków, ta sama lista priorytetów. Trzy decyzje, które za tym stoją:
+  <ol>
+    <li><strong>Ten sam limit co przy tworzeniu.</strong> Gdyby update dopuszczał mniej, ktoś kiedyś nie zapisałby zgłoszenia, które wcześniej dało się utworzyć — i nie miałby pojęcia dlaczego.</li>
+    <li><strong>Duplikat zamiast wspólnej klasy bazowej.</strong> Wspólny <code>TicketRulesValidator</code> oszczędziłby sześć linijek, ale związałby dwa slice’y: zmiana reguły przy tworzeniu po cichu zmieniłaby zachowanie update’u. Vertical slices kupują niezależność za cenę powtórzeń — to jest właśnie ta cena.</li>
+    <li><strong>Bez reguły na <code>Id</code>.</strong> <code>GreaterThan(0)</code> nic by nie dało: sprawdzone, <code>PUT /tickets/-5</code> i tak kończy się na 404 <code>ticket.not_found</code> z handlera, bo takiego zgłoszenia nie ma. Walidacja Id byłaby obroną przed czymś, co i tak jest obsłużone niżej.</li>
+  </ol>
+  Gdy dojdzie trzeci slice z tytułem, wróć do punktu 2 — <em>trzy</em> kopie to już inna rozmowa niż dwie.
+</div>
+
+<h2>Zapamiętaj bez zaglądania</h2>
+<details class="recall">
+  <summary>Gdzie odpala się walidacja i skąd wie, który walidator wziąć?</summary>
+  <p>W <code>ValidationSender</code> — dekoratorze <code>ISender</code>, przed <code>inner.Send(...)</code>. Typ walidatora składany jest w czasie działania: <code>typeof(IValidator&lt;&gt;).MakeGenericType(message.GetType())</code>, potem <code>provider.GetServices(...)</code>. Same walidatory rejestruje skan assembly (<code>AddValidatorsFromAssemblyContaining&lt;Program&gt;()</code>).</p>
+</details>
+<details class="recall">
+  <summary>Czym różni się odpowiedź na walidację od odpowiedzi na regułę domenową?</summary>
+  <p>Walidacja: 400, <code>code: "validation_failed"</code>, słownik <code>errors</code> z kompletem pól. Reguła domenowa: 404/409/403, jeden <code>code</code> (np. <code>ticket.not_found</code>), bez <code>errors</code>. Kryterium podziału: czy do rozstrzygnięcia potrzebny jest stan systemu.</p>
+</details>
+<details class="recall">
+  <summary>Kiedy ciało żądania musi iść z pliku, a nie z <code>-d '...'</code>?</summary>
+  <p>Gdy zawiera polskie znaki. Git Bash konwertuje argumenty na windowsową stronę kodową i UTF-8 się psuje — API zwraca 500 z <code>Cannot transcode invalid UTF-8 JSON text</code>. Wtedy: <code>cat &gt; body.json &lt;&lt;'JSON'</code> i <code>--data-binary @body.json</code>. Spacje w wartościach są w porządku.</p>
+</details>
+
+<h2>Źródło pierwotne</h2>
+<div class="callout source">
+  <a href="https://docs.fluentvalidation.net/en/latest/start.html">FluentValidation — Creating your first validator</a> (ok. 10 min), potem <a href="https://docs.fluentvalidation.net/en/latest/built-in-validators.html">Built-in validators</a> jako lista do przejrzenia i <a href="https://docs.fluentvalidation.net/en/latest/cascade.html">Setting the cascade mode</a> — ta strona wyjaśnia, czemu dostajesz dwa komunikaty na jedno pole.
+</div>
+<div class="callout ask">
+  Pytaj, jeśli coś nie klika. Warto też sprawdzić w firmowym repo: walidacja jest w <code>IPipelineBehavior</code>, czy wołana ręcznie w handlerze? I czy zwracają <code>errors</code> jako słownik, czy własny kształt — to kontrakt, który wasz frontend musi znać.
+</div>
+
+<h2>Co dalej</h2>
+<p>Lekcja 0009: <strong>EF Core + SQLite</strong>. <code>InMemoryTicketStore</code> ustąpi miejsca prawdziwej bazie — i pojawi się pierwsza reguła, której walidator nie sprawdzi, bo wymaga zapytania: unikalność.</p>
+
+<nav class="lesson-nav">
+  <a href="0007-bledy-problemdetails.html">← Lekcja 0007</a>
+  <a href="../reference/fluentvalidation.html">Ściąga: FluentValidation</a>
+  <a href="../reference/curl-bash.html">Ściąga: curl</a>
+</nav>
+</div>
+</body>
+</html>

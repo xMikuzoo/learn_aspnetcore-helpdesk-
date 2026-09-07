@@ -58,11 +58,13 @@ Pełne notatki z cytatami: [research/aspnet-learning-path.md](research/aspnet-le
 
 ### Walidacja
 - [FluentValidation: Creating your first validator](https://docs.fluentvalidation.net/en/latest/start.html) · [Installation](https://docs.fluentvalidation.net/en/latest/installation.html) · [DI](https://docs.fluentvalidation.net/en/latest/di.html)
-  `AbstractValidator<T>`, `RuleFor`, `AddValidatorsFromAssembly`. Wersja 12.1.1, Apache-2.0. Use for: lekcja 0007.
+  `AbstractValidator<T>`, `RuleFor`, `AddValidatorsFromAssembly`. Wersja 12.1.1, Apache-2.0. Use for: lekcja 0008 (zweryfikowane uruchomieniem).
 - [FluentValidation: ASP.NET Core integration](https://docs.fluentvalidation.net/en/latest/aspnet.html)
-  Docs mówią wprost: auto-walidacja ASP.NET to legacy, używaj ręcznej / pipeline behavior. Use for: lekcja 0007 — czemu walidacja siedzi w behaviorze, nie w endpoincie.
+  Docs mówią wprost: auto-walidacja ASP.NET to legacy, używaj ręcznej / pipeline behavior. Pakiet `FluentValidation.AspNetCore` porzucony. Use for: lekcja 0008 — czemu walidacja siedzi w behaviorze, nie w endpoincie.
 - [Milan Jovanović: CQRS Validation Pipeline with MediatR and FluentValidation](https://www.milanjovanovic.tech/blog/cqrs-validation-with-mediatr-pipeline-and-fluentvalidation)
-  Kompletny `ValidationBehavior<TRequest,TResponse>` + `AddOpenBehavior(typeof(ValidationBehavior<,>))`. Use for: lekcja 0007 — wzorzec, który najpewniej macie w pracy.
+  Kompletny `ValidationBehavior<TRequest,TResponse>` + `AddOpenBehavior(typeof(ValidationBehavior<,>))`. Use for: lekcja 0008 — wzorzec, który najpewniej macie w pracy.
+- [FluentValidation: Setting the cascade mode](https://docs.fluentvalidation.net/en/latest/cascade.html)
+  Domyślnie łańcuch reguł nie przerywa się po pierwszym błędzie — stąd dwa komunikaty na jedno pole. Use for: lekcja 0008.
 
 ### EF Core
 - [Microsoft Learn: Getting Started with EF Core](https://learn.microsoft.com/en-us/ef/core/get-started/overview/first-app?tabs=netcore-cli)

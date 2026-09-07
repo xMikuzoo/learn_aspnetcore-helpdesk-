@@ -7,12 +7,7 @@ public class UpdateTicketHandler(ITicketStore store) : ICommandHandler<UpdateTic
 {
     public Task<Unit> HandleAsync(UpdateTicketCommand command, CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrWhiteSpace(command.Title))
-        {
-            throw new DomainException(TicketErrors.EmptyTitle);
-        }
-
-        if (!store.Update(command.Id, command.Title))
+        if (!store.Update(command.Id, command.Title, command.Priority))
         {
             throw new DomainException(TicketErrors.NotFound(command.Id));
         }

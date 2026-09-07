@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FluentValidation + pipeline behavior — ściąga</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<div class="page">
+<header class="lesson-head">
+  <div class="kicker">Reference · Walidacja</div>
+  <h1>FluentValidation i pipeline behavior</h1>
+  <p class="subtitle">Ściąga do druku. API wg <a href="https://docs.fluentvalidation.net/en/latest/start.html">dokumentacji FluentValidation</a>; kod i odpowiedzi zweryfikowane na .NET 10.0.400 i FluentValidation 12.1.1.</p>
+  <p class="meta">Ćwiczone w <a href="../lessons/0008-fluentvalidation-pipeline.html">lekcji 0008</a>. Format błędu: <a href="errors-problemdetails.html">ściąga ProblemDetails</a>.</p>
+</header>
+
+<h2>Pakiet</h2>
+<pre><code>dotnet add package FluentValidation.DependencyInjectionExtensions</code></pre>
+<p><code>FluentValidation.AspNetCore</code> jest porzucony — nie instalować.</p>
+
+<h2>Walidator</h2>
+<pre><code><span class="kw">public class</span> <span class="ty">CreateTicketValidator</span> : <span class="ty">AbstractValidator</span>&lt;<span class="ty">CreateTicketCommand</span>&gt;
+{
+    <span class="kw">public</span> CreateTicketValidator()
+    {
+        RuleFor(c =&gt; c.Title)
+            .NotEmpty().WithMessage(<span class="str">"Tytuł zgłoszenia nie może być pusty."</span>)
+            .MaximumLength(100).WithMessage(<span class="str">"Tytuł zgłoszenia może mieć najwyżej 100 znaków."</span>);
+
+        RuleFor(c =&gt; c.Priority)
+            .NotEmpty().WithMessage(<span class="str">"Priorytet jest wymagany."</span>)
+            .Must(<span class="ty">TicketPriority</span>.IsAllowed).WithMessage(<span class="str">"Priorytet musi być jedną z wartości: low, normal, high."</span>);
+    }
+}</code></pre>
+<p>Jeden walidator na jedną komendę, plik obok komendy w slice’ie. Walidujemy <strong>command</strong>, nie request — bo to command przechodzi przez dispatcher.</p>
+
+<h2>Reguły, które się przydają</h2>
+<table>
+  <thead><tr><th>Reguła</th><th>Sprawdza</th></tr></thead>
+  <tbody>
+    <tr><td><code>NotEmpty()</code></td><td>nie null, nie pusty string, nie same białe znaki, nie wartość domyślna</td></tr>
+    <tr><td><code>NotNull()</code></td><td>tylko null (pusty string przechodzi)</td></tr>
+    <tr><td><code>MaximumLength(n)</code> / <code>MinimumLength(n)</code></td><td>długość tekstu</td></tr>
+    <tr><td><code>GreaterThan(0)</code>, <code>InclusiveBetween(a, b)</code></td><td>zakresy liczb i dat</td></tr>
+    <tr><td><code>EmailAddress()</code>, <code>Matches(regex)</code></td><td>format tekstu</td></tr>
+    <tr><td><code>Must(predykat)</code></td><td>dowolna własna reguła zwracająca <code>bool</code></td></tr>
+    <tr><td><code>MustAsync(...)</code></td><td>reguła z I/O — <em>ostrożnie</em>, patrz niżej</td></tr>
+    <tr><td><code>When(warunek)</code></td><td>reguła obowiązuje tylko w danym przypadku</td></tr>
+    <tr><td><code>RuleForEach(c =&gt; c.Items)</code></td><td>reguły dla każdego elementu kolekcji</td></tr>
+  </tbody>
+</table>
+<div class="callout warn">
+  Domyślnie łańcuch reguł <strong>nie przerywa się</strong> po pierwszym błędzie — jedno pole może zwrócić kilka komunikatów. <code>.Cascade(CascadeMode.Stop)</code> zmienia to dla danej reguły.
+</div>
+
+<h2>Pipeline behavior (dekorator <code>ISender</code>)</h2>
+<pre><code><span class="kw">private async</span> <span class="ty">Task</span> ValidateAsync(<span class="kw">object</span> message, <span class="ty">CancellationToken</span> ct)
+{
+    <span class="kw">var</span> validatorType = <span class="kw">typeof</span>(<span class="ty">IValidator</span>&lt;&gt;).MakeGenericType(message.GetType());
+    <span class="kw">var</span> validators = provider.GetServices(validatorType).Cast&lt;<span class="ty">IValidator</span>&gt;();
+    <span class="kw">var</span> context = <span class="kw">new</span> <span class="ty">ValidationContext</span>&lt;<span class="kw">object</span>&gt;(message);
+
+    <span class="kw">var</span> failures = <span class="kw">new</span> <span class="ty">List</span>&lt;<span class="ty">ValidationFailure</span>&gt;();
+
+    <span class="kw">foreach</span> (<span class="kw">var</span> validator <span class="kw">in</span> validators)
+    {
+        failures.AddRange((<span class="kw">await</span> validator.ValidateAsync(context, ct)).Errors);
+    }
+
+    <span class="kw">if</span> (failures.Count &gt; 0)
+    {
+        <span class="kw">throw new</span> <span class="ty">ValidationException</span>(failures);
+    }
+}</code></pre>
+<p>W MediatR to samo nazywa się <code>IPipelineBehavior&lt;TRequest, TResponse&gt;</code> z metodą <code>Handle(request, next, ct)</code>; <code>next()</code> odpowiada wywołaniu <code>inner.Send(...)</code>. Inne typowe behaviory: logowanie, transakcja, pomiar czasu.</p>
+
+<h2>Rejestracja</h2>
+<pre><code>services.AddScoped&lt;<span class="ty">Sender</span>&gt;();                          <span class="cm">// prawdziwy dispatcher pod własnym typem</span>
+services.AddScoped&lt;<span class="ty">ISender</span>, <span class="ty">ValidationSender</span>&gt;();       <span class="cm">// dekorator pod interfejsem</span>
+
+services.AddValidatorsFromAssemblyContaining&lt;<span class="ty">Program</span>&gt;();  <span class="cm">// skan: każdy AbstractValidator&lt;&gt;</span>
+
+services.AddProblemDetails();
+services.AddExceptionHandler&lt;<span class="ty">ValidationExceptionHandler</span>&gt;();
+services.AddExceptionHandler&lt;<span class="ty">DomainExceptionHandler</span>&gt;();</code></pre>
+<div class="callout warn">
+  <code>GetServices</code> na brak walidatora zwraca <strong>pustą listę, nie wyjątek</strong>. Zapomniany <code>AddValidation()</code> nie objawia się niczym — API po prostu przyjmuje śmieci ze statusem 201.
+</div>
+
+<h2>Odpowiedź</h2>
+<pre><code>HTTP/1.1 400 Bad Request
+Content-Type: application/problem+json
+
+{
+  <span class="str">"type"</span>: <span class="str">"https://tools.ietf.org/html/rfc9110#section-15.5.1"</span>,
+  <span class="str">"title"</span>: <span class="str">"Nieprawidłowe żądanie"</span>,
+  <span class="str">"status"</span>: 400,
+  <span class="str">"detail"</span>: <span class="str">"Popraw zaznaczone pola i wyślij formularz ponownie."</span>,
+  <span class="str">"code"</span>: <span class="str">"validation_failed"</span>,
+  <span class="str">"errors"</span>: {
+    <span class="str">"title"</span>: [<span class="str">"Tytuł zgłoszenia nie może być pusty."</span>],
+    <span class="str">"priority"</span>: [<span class="str">"Priorytet jest wymagany."</span>, <span class="str">"Priorytet musi być jedną z wartości: low, normal, high."</span>]
+  },
+  <span class="str">"traceId"</span>: <span class="str">"00-…-00"</span>
+}</code></pre>
+<pre><code>exception.Errors
+    .GroupBy(f =&gt; <span class="ty">JsonNamingPolicy</span>.CamelCase.ConvertName(f.PropertyName))
+    .ToDictionary(g =&gt; g.Key, g =&gt; g.Select(f =&gt; f.ErrorMessage).ToArray());</code></pre>
+<table>
+  <thead><tr><th>Element</th><th>Zasada</th></tr></thead>
+  <tbody>
+    <tr><td>klucz</td><td>nazwa pola <strong>tak jak w requeście</strong> (camelCase) — inaczej front nie podepnie błędu pod input</td></tr>
+    <tr><td>wartość</td><td>tablica stringów; obiekty łamią kontrakt <code>ValidationProblemDetails</code></td></tr>
+    <tr><td><code>code</code></td><td>jeden na odpowiedź (<code>validation_failed</code>); rozróżnienie per pole siedzi w kluczach</td></tr>
+  </tbody>
+</table>
+
+<h2>Walidacja czy reguła domenowa</h2>
+<table>
+  <thead><tr><th></th><th>Walidacja</th><th>Reguła domenowa</th></tr></thead>
+  <tbody>
+    <tr><td>Skąd wiadomo</td><td>z samego requestu</td><td>ze stanu systemu</td></tr>
+    <tr><td>Gdzie</td><td><code>AbstractValidator</code>, przed handlerem</td><td>w handlerze</td></tr>
+    <tr><td>Ile błędów</td><td>komplet</td><td>jeden</td></tr>
+    <tr><td>Status</td><td>400 + <code>errors</code></td><td>404 / 409 / 403, pojedynczy <code>code</code></td></tr>
+    <tr><td>Przykład</td><td>pusty tytuł, zły priorytet, zły format e-maila</td><td>zgłoszenie nie istnieje, e-mail zajęty, zamknięte zgłoszenie</td></tr>
+  </tbody>
+</table>
+<div class="callout warn">
+  <code>MustAsync</code> z zapytaniem do bazy kusi, ale przenosi regułę domenową do walidatora: dwa zapytania (walidator + handler), wyścig między nimi i błąd, który logicznie jest 409, a wraca jako 400. Unikalność sprawdza handler albo baza (unique index).
+</div>
+
+<h2>Diagnostyka</h2>
+<table>
+  <thead><tr><th>Objaw</th><th>Przyczyna</th></tr></thead>
+  <tbody>
+    <tr><td>201 mimo pustego pola</td><td>brak <code>AddValidation()</code> albo walidator na requeście zamiast na commandzie</td></tr>
+    <tr><td>500 zamiast 400, w logu <code>FluentValidation.ValidationException</code></td><td>niezarejestrowany <code>ValidationExceptionHandler</code></td></tr>
+    <tr><td>front nie podświetla pól</td><td>klucze w <code>errors</code> w PascalCase — brak <code>JsonNamingPolicy.CamelCase</code></td></tr>
+    <tr><td>jeden komunikat zamiast kilku</td><td><code>CascadeMode.Stop</code> gdzieś w łańcuchu albo <code>if</code> został w handlerze</td></tr>
+    <tr><td>walidator nie działa po dodaniu nowego pliku</td><td>klasa nie dziedziczy po <code>AbstractValidator&lt;&gt;</code> albo jest w innym assembly niż skanowane</td></tr>
+  </tbody>
+</table>
+
+<nav class="lesson-nav">
+  <a href="errors-problemdetails.html">← Ściąga: ProblemDetails</a>
+  <a href="curl-bash.html">Ściąga: curl</a>
+  <a href="../lessons/0008-fluentvalidation-pipeline.html">Lekcja 0008 →</a>
+</nav>
+</div>
+</body>
+</html>
