@@ -1,5 +1,6 @@
 using Helpdesk.Features.Tickets.Commands.CreateTicket;
 using Helpdesk.Features.Tickets.Commands.DeleteTicket;
+using Helpdesk.Features.Tickets.Commands.ResolveTicket;
 using Helpdesk.Features.Tickets.Commands.UpdateTicket;
 using Helpdesk.Features.Tickets.Queries.GetTicket;
 using Helpdesk.Features.Tickets.Queries.GetTicketMetrics;
@@ -26,6 +27,7 @@ public static class TicketsFeature
         GetTicketMetricsEndpoint.Map(tickets);
         CreateTicketEndpoint.Map(tickets);
         UpdateTicketEndpoint.Map(tickets);
+        ResolveTicketEndpoint.Map(tickets);
         DeleteTicketEndpoint.Map(tickets);
 
         return tickets;

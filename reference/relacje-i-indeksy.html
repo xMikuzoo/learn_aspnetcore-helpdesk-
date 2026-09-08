@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Relacje i indeksy w EF Core — ściąga</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<div class="page">
+<header class="lesson-head">
+  <div class="kicker">Reference · Dane</div>
+  <h1>Relacje, klucze obce i indeksy</h1>
+  <p class="subtitle">Ściąga do druku. SQL i komunikaty błędów zweryfikowane na .NET 10.0.400, EF Core 10.0.11, SQLite 3.50.4, Windows 11.</p>
+  <p class="meta">Ćwiczone w <a href="../lessons/0011-relacja-i-unikalnosc-warunkowa.html">lekcji 0011</a>. Powiązane: <a href="ef-core-migrations.html">EF Core + migracje</a>, <a href="errors-problemdetails.html">ProblemDetails</a>, <a href="glossary.html">glosariusz</a>.</p>
+</header>
+
+<h2>Relacja jeden-do-wielu</h2>
+<pre><code>public class Ticket
+{
+    public int RequesterId { get; private set; }      <span class="cm">// foreign key property</span>
+    public Requester? Requester { get; private set; } <span class="cm">// navigation property</span>
+}
+
+builder
+    .HasOne(t =&gt; t.Requester)
+    .WithMany()
+    .HasForeignKey(t =&gt; t.RequesterId)
+    .OnDelete(DeleteBehavior.Restrict);</code></pre>
+<table>
+  <thead><tr><th>Element</th><th>Znaczenie</th></tr></thead>
+  <tbody>
+    <tr><td><code>HasOne(t =&gt; t.Requester)</code></td><td>ta encja ma jednego zgłaszającego</td></tr>
+    <tr><td><code>WithMany()</code></td><td>zgłaszający ma wiele zgłoszeń; kolekcji po jego stronie nie modelujemy</td></tr>
+    <tr><td><code>WithMany(r =&gt; r.Tickets)</code></td><td>to samo, ale z kolekcją w <code>Requester</code>. Dodawaj dopiero, gdy jakiś kod jej używa</td></tr>
+    <tr><td><code>HasForeignKey(t =&gt; t.RequesterId)</code></td><td>która właściwość jest kluczem obcym</td></tr>
+    <tr><td>FK typu <code>int</code></td><td>relacja wymagana — kolumna <code>NOT NULL</code></td></tr>
+    <tr><td>FK typu <code>int?</code></td><td>relacja opcjonalna — kolumna <code>NULL</code> dozwolona</td></tr>
+    <tr><td>nawigacja <code>Requester?</code></td><td>nullowalność <em>obiektu w pamięci</em> (bez <code>Include</code> jest <code>null</code>), nie kolumny w bazie</td></tr>
+  </tbody>
+</table>
+<p>Indeks na kolumnie FK powstaje <strong>z konwencji</strong> — nie trzeba go dopisywać ręcznie.</p>
+
+<h3><code>OnDelete</code> — co się dzieje z dziećmi</h3>
+<table>
+  <thead><tr><th>Wartość</th><th>Efekt przy usuwaniu rodzica</th><th>Kiedy</th></tr></thead>
+  <tbody>
+    <tr><td><code>Cascade</code></td><td>dzieci znikają razem z rodzicem</td><td>gdy dziecko nie ma sensu bez rodzica (pozycja zamówienia)</td></tr>
+    <tr><td><code>Restrict</code></td><td>baza odmawia usunięcia rodzica</td><td>dane historyczne: zgłoszenia, faktury, logi</td></tr>
+    <tr><td><code>SetNull</code></td><td>FK dziecka ustawiany na <code>NULL</code></td><td>tylko dla FK nullowalnego</td></tr>
+  </tbody>
+</table>
+<div class="callout warn">
+  Domyślne przy <strong>wymaganym</strong> FK jest <code>Cascade</code>, przy opcjonalnym <code>ClientSetNull</code>. Kaskadę bardzo łatwo odziedziczyć bez decyzji — jeśli dane mają wartość historyczną, wpisz <code>Restrict</code> jawnie.
+</div>
+
+<h2>Indeksy — cztery poziomy</h2>
+<pre><code>builder.HasIndex(t =&gt; t.Title);                                  <span class="cm">// szybciej szukać</span>
+builder.HasIndex(t =&gt; t.Title).IsUnique();                       <span class="cm">// globalny zakaz duplikatu</span>
+builder.HasIndex(t =&gt; new { t.RequesterId, t.Title }).IsUnique();<span class="cm">// unikalna PARA</span>
+builder.HasIndex(t =&gt; new { t.RequesterId, t.Title })            <span class="cm">// unikalna para,</span>
+       .IsUnique()                                               <span class="cm">// ale tylko wśród</span>
+       .HasFilter("\"Status\" &lt;&gt; 'Resolved'");                    <span class="cm">// wierszy z warunku</span></code></pre>
+<table>
+  <thead><tr><th>Zasada</th><th>Szczegół</th></tr></thead>
+  <tbody>
+    <tr><td>klucz złożony = krotka</td><td>duplikatem jest powtórzenie <em>całej</em> pary; <code>(1,"X")</code> i <code>(2,"X")</code> współistnieją</td></tr>
+    <tr><td>kolejność kolumn</td><td><code>(A, B)</code> przyspiesza też zapytania po samym <code>A</code> (prefiks), ale nie po samym <code>B</code></td></tr>
+    <tr><td>nazwa domyślna</td><td><code>IX_&lt;tabela&gt;_&lt;kolumna&gt;_&lt;kolumna&gt;</code>; zmiana: <code>HasDatabaseName("…")</code></td></tr>
+    <tr><td>dwa indeksy na tych samych kolumnach</td><td>drugie <code>HasIndex</code> <em>nadpisuje</em> pierwsze; osobny indeks wymaga <code>HasIndex(…, "nazwa")</code></td></tr>
+    <tr><td><code>HasIndex</code> na kluczu głównym</td><td>błąd — PK ma już indeks; dostajesz drugi, nieunikalny, płatny przy każdym zapisie</td></tr>
+    <tr><td><code>HasFilter</code></td><td>surowy SQL, wklejany do <code>CREATE INDEX … WHERE …</code>. EF go nie parsuje</td></tr>
+  </tbody>
+</table>
+
+<h3>Cytowanie nazw kolumn w <code>HasFilter</code></h3>
+<table>
+  <thead><tr><th>Provider</th><th>Zapis</th></tr></thead>
+  <tbody>
+    <tr><td>SQLite, PostgreSQL</td><td><code>"Status" &lt;&gt; 'Resolved'</code> (w C#: <code>"\"Status\" &lt;&gt; 'Resolved'"</code>)</td></tr>
+    <tr><td>SQL Server</td><td><code>[Status] &lt;&gt; 'Resolved'</code></td></tr>
+  </tbody>
+</table>
+<p>Literówka w nazwie kolumny nie zatrzyma ani kompilacji, ani <code>migrations add</code> — wybucha dopiero <code>database update</code>.</p>
+
+<h2><code>NULL</code> a unikalność</h2>
+<table>
+  <thead><tr><th>Baza</th><th>Dwa wiersze z <code>NULL</code> w indeksie unikalnym</th></tr></thead>
+  <tbody>
+    <tr><td>SQLite, PostgreSQL (standard SQL)</td><td>przechodzą — <code>NULL</code> nie równa się niczemu</td></tr>
+    <tr><td>SQL Server</td><td>drugi odpada — <code>NULL</code>-e traktowane jak równe</td></tr>
+  </tbody>
+</table>
+<p>Provider SQL Servera w EF Core sam dokłada filtr <code>IS NOT NULL</code> dla nullowalnych kolumn indeksu unikalnego; wyłącza się to przez <code>HasFilter(null)</code> (<a href="https://learn.microsoft.com/ef/core/modeling/indexes#index-filter">docs</a>). Wniosek praktyczny: <strong>unikalność złożoną opieraj na kolumnach wymaganych</strong>, a jeśli musisz objąć nullowalną — dopisz warunek świadomie.</p>
+
+<h2><code>enum</code> w bazie</h2>
+<pre><code>builder.Property(t =&gt; t.Status).IsRequired().HasMaxLength(20).HasConversion&lt;string&gt;();</code></pre>
+<p>Bez <code>HasConversion</code> w kolumnie ląduje liczba. Tekst wybieramy, bo dane są czytelne, a warunek indeksu (<code>&lt;&gt; 'Resolved'</code>) nie zmienia znaczenia po dopisaniu wartości w środek <code>enum</code>-a.</p>
+
+<h2>Migracja z relacją na SQLite</h2>
+<pre><code>dotnet ef migrations add TicketRequester
+dotnet ef migrations script InitialCreate TicketRequester   <span class="cm"># zobacz SQL, nie ruszając bazy</span>
+dotnet ef database update
+dotnet ef migrations remove                                 <span class="cm"># cofnij OSTATNIĄ niezaaplikowaną</span></code></pre>
+<p>Ostrzeżenie przy dokładaniu kolumny <code>NOT NULL</code> do istniejącej tabeli — to ostrzeżenie, nie błąd:</p>
+<pre><code>An operation was scaffolded that may result in the loss of data. Please review the migration for accuracy.</code></pre>
+<p>SQLite nie ma <code>ALTER TABLE … ADD CONSTRAINT</code>, więc dodanie klucza obcego generuje przebudowę tabeli:</p>
+<pre><code>CREATE TABLE "ef_temp_Tickets" ( … CONSTRAINT "FK_…" FOREIGN KEY … ON DELETE RESTRICT );
+INSERT INTO "ef_temp_Tickets" … SELECT … FROM "Tickets";
+PRAGMA foreign_keys = 0;
+DROP TABLE "Tickets";
+ALTER TABLE "ef_temp_Tickets" RENAME TO "Tickets";
+PRAGMA foreign_keys = 1;
+CREATE UNIQUE INDEX … <span class="cm">-- indeksy zakładane ponownie</span></code></pre>
+<p>Na SQL Serverze i Postgresie ta sama migracja to zwykłe <code>ALTER TABLE</code>.</p>
+
+<h2>Wymagany FK w niepustej tabeli — <em>data migration</em></h2>
+<pre><code>SQLite Error 19: 'FOREIGN KEY constraint failed'</code></pre>
+<p>Bierze się stąd, że nowa kolumna <code>NOT NULL</code> dostaje <code>DEFAULT 0</code>, a wygenerowane <code>UpdateData</code> poprawia tylko wiersze znane z <code>HasData</code>. Reszta zostaje z <code>RequesterId = 0</code> i przy zakładaniu FK nie ma na co wskazywać. Lekarstwo — dopisać do migracji, po <code>InsertData</code> rodziców, a przed FK:</p>
+<pre><code>migrationBuilder.Sql("""
+    UPDATE Tickets SET RequesterId = 1 WHERE RequesterId = 0;
+    """);
+
+migrationBuilder.Sql("""
+    UPDATE Tickets SET Status = 'Open' WHERE Status = '';
+    """);</code></pre>
+<table>
+  <thead><tr><th>Pułapka</th><th>Objaw</th></tr></thead>
+  <tbody>
+    <tr><td>osierocony FK (<code>0</code>)</td><td>migracja pada od razu — <code>FOREIGN KEY constraint failed</code></td></tr>
+    <tr><td>pusty string w kolumnie <code>enum</code>-a</td><td>migracja przechodzi, wywala się dopiero odczyt encji</td></tr>
+  </tbody>
+</table>
+<p>Reguła: <strong>dodaj kolumnę → uzupełnij dane → nałóż ograniczenie</strong>, w tej kolejności, w razie potrzeby w osobnych migracjach. Nieudana migracja cofa się w całości (transakcja) — poza operacjami takimi jak <code>PRAGMA foreign_keys = 0</code>, o których EF ostrzega osobno.</p>
+
+<h2>Błąd naruszenia unikalności</h2>
+<pre><code>Microsoft.EntityFrameworkCore.DbUpdateException: An error occurred while saving the entity changes.
+ ---&gt; Microsoft.Data.Sqlite.SqliteException (0x80004005): SQLite Error 19:
+      'UNIQUE constraint failed: Tickets.RequesterId, Tickets.Title'</code></pre>
+<table>
+  <thead><tr><th></th><th>Sprawdzenie w handlerze</th><th>Indeks w bazie</th></tr></thead>
+  <tbody>
+    <tr><td>odpowiedź HTTP</td><td>409 z <code>detail</code></td><td>500 + stack trace</td></tr>
+    <tr><td>równoległe żądania</td><td>przepuści oba</td><td>zatrzyma drugi</td></tr>
+    <tr><td>zapis spoza aplikacji</td><td>nie obowiązuje</td><td>obowiązuje</td></tr>
+  </tbody>
+</table>
+<p>Trzymaj oba. Konflikt wyłapany warunkowo dotyczy też <code>UPDATE</code>: zmiana statusu z <code>Resolved</code> na <code>Open</code> wciąga wiersz z powrotem w zakres indeksu i może go naruszyć.</p>
+
+<h2>Do sprawdzenia w firmowym repo</h2>
+<ul>
+  <li>Czy unikalne indeksy stoją na kolumnach nullowalnych — i czy ktoś to policzył?</li>
+  <li>Czy relacje mają jawne <code>OnDelete</code>, czy jadą na domyślnej kaskadzie?</li>
+  <li>Czy reguły biznesowe żyją tylko w handlerach, czy też w schemacie?</li>
+  <li>Czy gdzieś jest <code>HasIndex</code> na kluczu głównym (zbędny drugi indeks)?</li>
+</ul>
+
+<p class="meta"><a href="../lessons/0011-relacja-i-unikalnosc-warunkowa.html">← lekcja 0011</a> · <a href="glossary.html">glosariusz</a> · źródło: <a href="https://learn.microsoft.com/ef/core/modeling/indexes">EF Core — Indexes</a>, <a href="https://learn.microsoft.com/ef/core/modeling/relationships/one-to-many">One-to-many</a>, <a href="https://learn.microsoft.com/ef/core/saving/cascade-delete">Cascade delete</a>.</p>
+</div>
+</body>
+</html>

@@ -11,12 +11,20 @@ public class EfTicketStore(HelpdeskDbContext db) : ITicketStore
     public Task<Ticket?> GetByIdAsync(int id, CancellationToken cancellationToken = default) =>
         db.Tickets.AsNoTracking().FirstOrDefaultAsync(t => t.Id == id, cancellationToken);
 
-    public Task<bool> TitleExistsAsync(string title, CancellationToken cancellationToken = default) =>
-        db.Tickets.AnyAsync(t => t.Title == title, cancellationToken);
+    public Task<int?> FindRequesterIdAsync(string login, CancellationToken cancellationToken = default) =>
+        db.Requesters
+            .Where(r => r.Login == login)
+            .Select(r => (int?)r.Id)
+            .FirstOrDefaultAsync(cancellationToken);
 
-    public async Task<Ticket> AddAsync(string title, string priority, CancellationToken cancellationToken = default)
+    public Task<bool> UnresolvedTitleExistsAsync(int requesterId, string title, CancellationToken cancellationToken = default) =>
+        db.Tickets.AnyAsync(
+            t => t.RequesterId == requesterId && t.Title == title && t.Status != TicketStatus.Resolved,
+            cancellationToken);
+
+    public async Task<Ticket> AddAsync(string title, string priority, int requesterId, CancellationToken cancellationToken = default)
     {
-        var ticket = Ticket.Create(title, priority);
+        var ticket = Ticket.Create(title, priority, requesterId);
 
         db.Tickets.Add(ticket);
         await db.SaveChangesAsync(cancellationToken);
@@ -34,6 +42,20 @@ public class EfTicketStore(HelpdeskDbContext db) : ITicketStore
 
         ticket.Rename(title);
         ticket.ChangePriority(priority);
+        await db.SaveChangesAsync(cancellationToken);
+
+        return true;
+    }
+
+    public async Task<bool> ResolveAsync(int id, CancellationToken cancellationToken = default)
+    {
+        var ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == id, cancellationToken);
+        if (ticket is null)
+        {
+            return false;
+        }
+
+        ticket.Resolve();
         await db.SaveChangesAsync(cancellationToken);
 
         return true;

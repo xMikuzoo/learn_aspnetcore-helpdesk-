@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>0011 · Relacja i unikalność warunkowa — ASP.NET Core dla frontendowca</title>
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/quiz.js" defer></script>
+<script src="../assets/checklist.js" defer></script>
+</head>
+<body>
+<div class="page">
+<header class="lesson-head">
+  <div class="kicker">Lekcja 0011 · ~25 min · projekt Helpdesk</div>
+  <h1>Relacja, klucz obcy i unikalność <em>warunkowa</em></h1>
+  <p class="subtitle">Cel: zamodelować regułę „ten sam zgłaszający nie może mieć dwóch <strong>nierozwiązanych</strong> zgłoszeń o tym samym tytule” — i wiedzieć, dlaczego zwykły <code>IsUnique()</code> na <code>Title</code> jest do tego za tępy.</p>
+  <p class="meta">Wymaga: <a href="0009-ef-core-sqlite.html">lekcji 0009</a> (EF Core, migracje), <a href="0007-bledy-problemdetails.html">0007</a> (<code>DomainException</code>). Ściągi: <a href="../reference/relacje-i-indeksy.html">relacje i indeksy</a>, <a href="../reference/ef-core-migrations.html">EF Core + migracje</a>, <a href="../reference/curl-bash.html">curl</a>.</p>
+</header>
+
+<h2>Reguła, którą modelujemy</h2>
+<p>Do tej pory unikalność w Helpdesku była globalna i naiwna: <em>żadne dwa zgłoszenia nie mogą mieć tego samego tytułu</em>. To reguła nie do obrony. „Drukarka nie drukuje” zgłasza pół firmy, i to co miesiąc. Prawdziwa reguła ma dwa wymiary:</p>
+<blockquote>
+  <p><strong>Jeden zgłaszający</strong> nie może mieć <strong>dwóch nierozwiązanych</strong> zgłoszeń o tym samym tytule. Inny zgłaszający — może. Ten sam zgłaszający po zamknięciu poprzedniego — też może.</p>
+</blockquote>
+<p>Trzy niezależne rzeczy do zrobienia, każda uczy czegoś innego:</p>
+<table>
+  <thead><tr><th>Element</th><th>Narzędzie</th><th>Czego uczy</th></tr></thead>
+  <tbody>
+    <tr><td>„zgłaszający” musi istnieć jako byt</td><td>encja <code>Requester</code> + klucz obcy</td><td>relacja, <code>HasOne</code>/<code>WithMany</code>, <code>OnDelete</code></td></tr>
+    <tr><td>unikalność <em>w obrębie</em> zgłaszającego</td><td>indeks złożony <code>(RequesterId, Title)</code></td><td>klucz naturalny z wielu kolumn</td></tr>
+    <tr><td>„nierozwiązanych”</td><td><code>HasFilter(...)</code> — indeks częściowy</td><td>ograniczenie zależne od <em>stanu</em> wiersza</td></tr>
+  </tbody>
+</table>
+<div class="callout analogy">
+  Znasz to z Prismy jako <code>@@unique([requesterId, title])</code>. Czego Prisma <em>nie</em> ma w schemacie: warunku. Trzeci wymiar — „tylko dla wierszy spełniających warunek” — w Prismie robi się surowym SQL-em dopisanym do migracji. Tutaj jest jedną metodą fluent API.
+</div>
+
+<h2>Krok 1 — relacja: <code>Ticket</code> ma zgłaszającego</h2>
+<p class="filename">Features/Requesters/Requester.cs</p>
+<pre><code>public class Requester
+{
+    private Requester(string login, string displayName)
+    {
+        Login = login;
+        DisplayName = displayName;
+    }
+
+    public int Id { get; private set; }
+    public string Login { get; private set; }
+    public string DisplayName { get; private set; }
+
+    public static Requester Create(string login, string displayName) =&gt; new(login, displayName);
+}</code></pre>
+<p><code>Login</code> to ta sama wartość, którą <code>HeaderCurrentUser</code> czyta z nagłówka <code>X-User</code> (lekcja 0002). Nagłówek zostaje udawaniem logowania — ale od teraz wskazuje na <em>wiersz w bazie</em>, nie na luźny string.</p>
+
+<p class="filename">Features/Tickets/Ticket.cs — nowe pola</p>
+<pre><code>public TicketStatus Status { get; private set; }
+public int RequesterId { get; private set; }
+public Requester? Requester { get; private set; }
+
+public void Resolve() =&gt; Status = TicketStatus.Resolved;</code></pre>
+<table>
+  <thead><tr><th>Element</th><th>Po co</th></tr></thead>
+  <tbody>
+    <tr><td><code>RequesterId</code> — <em>foreign key property</em></td><td>kolumna w tabeli. Po niej filtrujesz i ją wpisujesz przy tworzeniu, bez dociągania drugiej encji</td></tr>
+    <tr><td><code>Requester</code> — <em>navigation property</em></td><td>obiekt po drugiej stronie. Wypełniony <strong>tylko</strong> wtedy, gdy poprosisz o <code>Include</code></td></tr>
+    <tr><td>czemu <code>Requester?</code> jest nullowalne</td><td>bo bez <code>Include</code> <em>naprawdę</em> jest <code>null</code>. Nullowalność nawigacji opisuje stan obiektu w pamięci, <strong>nie</strong> to, czy kolumna w bazie może być pusta — o tym decyduje <code>RequesterId</code>, tu <code>int</code>, czyli wymagany</td></tr>
+  </tbody>
+</table>
+<p class="filename">Features/Tickets/TicketConfiguration.cs</p>
+<pre><code>builder
+    .HasOne(t =&gt; t.Requester)
+    .WithMany()
+    .HasForeignKey(t =&gt; t.RequesterId)
+    .OnDelete(DeleteBehavior.Restrict);</code></pre>
+<p><code>WithMany()</code> bez argumentu znaczy: „zgłaszający ma wiele zgłoszeń, ale kolekcji po jego stronie nie modeluję”. Nie dodawaj <code>List&lt;Ticket&gt; Tickets</code> do <code>Requester</code>, dopóki nie masz kodu, który jej używa — kolekcja bez odbiorcy to zaproszenie do przypadkowego wciągnięcia całej tabeli.</p>
+<div class="callout warn">
+  <strong><code>Restrict</code>, nie domyślny <code>Cascade</code>.</strong> Przy <em>wymaganym</em> kluczu obcym (<code>int</code>, nie <code>int?</code>) EF domyślnie ustawia kaskadę: usunięcie zgłaszającego skasuje wszystkie jego zgłoszenia. Dla danych o wartości historycznej — zgłoszenia, faktury, logi — to prawie zawsze błąd. <code>Restrict</code> sprawia, że baza odmówi usunięcia zgłaszającego, który ma zgłoszenia.
+</div>
+
+<h2>Krok 2 — status jako <code>enum</code>, w bazie jako tekst</h2>
+<pre><code>public enum TicketStatus { Open, InProgress, Resolved }
+
+builder.Property(t =&gt; t.Status).IsRequired().HasMaxLength(20).HasConversion&lt;string&gt;();</code></pre>
+<p>Bez <code>HasConversion&lt;string&gt;()</code> EF zapisałby <code>enum</code> jako liczbę i w bazie stałoby <code>0</code>, <code>1</code>, <code>2</code>. Zapisujemy tekst z dwóch powodów: dane dają się czytać bez zaglądania do kodu, a — co ważniejsze za chwilę — <strong>warunek indeksu piszesz w SQL-u</strong>, więc lepiej, żeby brzmiał <code>&lt;&gt; 'Resolved'</code> niż <code>&lt;&gt; 2</code>. Numer zmieni znaczenie w dniu, w którym ktoś wstawi nową wartość w środek <code>enum</code>-a.</p>
+
+<h2>Krok 3 — trzy poziomy „unikalności”</h2>
+<p>To jest sedno lekcji. Ta sama reguła, trzy różne siły:</p>
+<table>
+  <thead><tr><th>Zapis</th><th>Co zabrania</th></tr></thead>
+  <tbody>
+    <tr><td><code>HasIndex(t =&gt; t.Title).IsUnique()</code></td><td>dwóch zgłoszeń o tym samym tytule — <em>w całej firmie, na zawsze</em></td></tr>
+    <tr><td><code>HasIndex(t =&gt; new { t.RequesterId, t.Title }).IsUnique()</code></td><td>dwóch zgłoszeń tego samego zgłaszającego o tym samym tytule — <em>na zawsze</em></td></tr>
+    <tr><td><code>… .IsUnique().HasFilter("…")</code></td><td>dwóch <em>nierozwiązanych</em> zgłoszeń tego samego zgłaszającego o tym samym tytule</td></tr>
+  </tbody>
+</table>
+<p>Indeks złożony to <strong>para</strong> kolumn traktowana jako jeden klucz. Duplikatem jest dopiero powtórzenie <em>całej pary</em>: <code>(1, "Drukarka")</code> i <code>(2, "Drukarka")</code> to dwie różne wartości, więc oba wiersze przechodzą. Dwa osobne indeksy unikalne dałyby coś zupełnie innego — zakaz dwóch zgłoszeń tego samego zgłaszającego <em>w ogóle</em> i zakaz dwóch o tym samym tytule <em>w ogóle</em>.</p>
+<div class="callout">
+  <strong>Kolejność kolumn nie jest kosmetyką.</strong> Indeks <code>(RequesterId, Title)</code> przyspiesza też zapytania filtrujące po <em>samym</em> <code>RequesterId</code> — po prefiksie. Ale nie po samym <code>Title</code>. Gdybyś częściej szukał po tytule niż po zgłaszającym, kolejność powinna być odwrotna; unikalność wyszłaby identyczna. <a href="https://learn.microsoft.com/ef/core/modeling/indexes#composite-index">EF Core docs — composite index</a>
+</div>
+
+<h3>Indeks częściowy (<em>filtered / partial index</em>)</h3>
+<p><code>HasFilter</code> przyjmuje <strong>surowy SQL</strong>, wklejany do <code>CREATE INDEX … WHERE …</code>. EF go nie parsuje i nie tłumaczy — nie sprawdzi nawet, czy taka kolumna istnieje. Konsekwencje dwie: składnia zależy od providera (<code>"Status"</code> w SQLite i Postgresie, <code>[Status]</code> w SQL Serverze), a literówka wyjdzie dopiero przy <code>database update</code>.</p>
+<p>Wiersz, który nie spełnia warunku, po prostu <strong>nie istnieje dla indeksu</strong>. Rozwiązanie zgłoszenia usuwa je z indeksu i zwalnia parę — dlatego reguła „dopóki poprzednie nie zostanie rozwiązane” wychodzi tu za darmo, bez żadnego kodu sprzątającego.</p>
+
+<h2>Krok 4 — pułapka: <code>NULL</code> w kluczu złożonym</h2>
+<p>Weź inny wariant tej samej historii: kolumna <code>AssigneeId</code> jest <strong>nullowalna</strong>, bo świeże zgłoszenie nie ma jeszcze właściciela, a ty robisz na niej indeks złożony <code>(AssigneeId, Title)</code>. Sprawdziłem, co robi wtedy SQLite (3.50.4):</p>
+<pre><code>CREATE UNIQUE INDEX ix ON t (assignee, title);
+INSERT INTO t (assignee, title) VALUES (NULL, 'drukarka');   <span class="cm">-- ok</span>
+INSERT INTO t (assignee, title) VALUES (NULL, 'drukarka');   <span class="cm">-- TEŻ ok. Dwa wiersze.</span>
+INSERT INTO t (assignee, title) VALUES (1, 'drukarka');      <span class="cm">-- ok</span>
+INSERT INTO t (assignee, title) VALUES (1, 'drukarka');      <span class="cm">-- UNIQUE constraint failed</span></code></pre>
+<p>W standardzie SQL <code>NULL</code> znaczy „nieznane”, a dwie nieznane wartości nie są sobie równe — więc indeks unikalny ich nie porównuje. Twoja reguła przestaje obowiązywać dokładnie tam, gdzie zwykle jest najbardziej potrzebna: wśród zgłoszeń jeszcze nieprzypisanych.</p>
+<div class="callout warn">
+  <strong>I to zachowuje się różnie w różnych bazach.</strong> SQL Server idzie pod prąd standardu: traktuje <code>NULL</code>-e jako równe i dopuszcza tylko <em>jeden</em> taki wiersz. EF Core to za ciebie łata — <em>„When using the SQL Server provider EF adds an <code>'IS NOT NULL'</code> filter for all nullable columns that are part of a unique index”</em> (<a href="https://learn.microsoft.com/ef/core/modeling/indexes#index-filter">EF Core docs — index filter</a>). Ten sam kod C# daje więc inny SQL i inną regułę na SQLite niż na SQL Serverze. Jeśli w firmowym repo zobaczysz unikalny indeks na nullowalnej kolumnie — warto sprawdzić, czy autor o tym wiedział.
+</div>
+<p>W naszej regule problemu nie ma, bo <code>RequesterId</code> jest wymagany (<code>int</code>). To nie przypadek: <strong>unikalność złożona ma sens tylko na kolumnach, które nie bywają puste.</strong></p>
+
+<h2>Krok 5 — co robi migracja (i dlaczego straszy)</h2>
+<pre><code>dotnet ef migrations add TicketRequester</code></pre>
+<pre><code>An operation was scaffolded that may result in the loss of data. Please review the migration for accuracy.</code></pre>
+<p>To ostrzeżenie, nie błąd. Bierze się stąd, że dokładasz kolumnę <code>NOT NULL</code> do istniejącej tabeli (EF wstawi w starych wierszach <code>defaultValue: 0</code>) i że SQLite musi przebudować tabelę. Zajrzyj w SQL, żeby zobaczyć tę przebudowę:</p>
+<pre><code>dotnet ef migrations script InitialCreate TicketRequester</code></pre>
+<pre><code>CREATE UNIQUE INDEX "IX_Tickets_RequesterId_Title" ON "Tickets" ("RequesterId", "Title")
+    WHERE "Status" &lt;&gt; 'Resolved';
+
+CREATE TABLE "ef_temp_Tickets" ( … CONSTRAINT "FK_Tickets_Requesters_RequesterId"
+    FOREIGN KEY ("RequesterId") REFERENCES "Requesters" ("Id") ON DELETE RESTRICT );
+INSERT INTO "ef_temp_Tickets" … SELECT … FROM "Tickets";
+PRAGMA foreign_keys = 0;
+DROP TABLE "Tickets";
+ALTER TABLE "ef_temp_Tickets" RENAME TO "Tickets";
+PRAGMA foreign_keys = 1;
+CREATE UNIQUE INDEX "IX_Tickets_RequesterId_Title" … <span class="cm">-- drugi raz, już na nowej tabeli</span></code></pre>
+<p>SQLite nie umie <code>ALTER TABLE … ADD CONSTRAINT</code>, więc EF robi kopię tabeli, przenosi dane, kasuje oryginał, przemianowuje kopię — i zakłada indeksy ponownie. Na SQL Serverze i Postgresie ta sama migracja to zwykłe <code>ALTER TABLE</code>. Zapamiętaj to jako regułę ogólną: <strong>migracja jest kodem generowanym pod konkretny dialekt</strong> i warto ją przeczytać, zanim pojedzie na produkcję.</p>
+
+<h3>Gdy tabela nie jest pusta — <em>data migration</em></h3>
+<p>Ta migracja wykłada się na prawdziwej bazie i to jest najcenniejsza rzecz w całej lekcji:</p>
+<pre><code>Applying migration '20260908074810_TicketRequester'.
+ALTER TABLE "Tickets" ADD "RequesterId" INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE "Tickets" ADD "Status" TEXT NOT NULL DEFAULT '';
+…
+INSERT INTO "ef_temp_Tickets" (…) SELECT … FROM "Tickets";
+<span class="cm">SQLite Error 19: 'FOREIGN KEY constraint failed'</span></code></pre>
+<p>Prześledź, co się stało. Nowa kolumna <code>NOT NULL</code> musi mieć czym wypełnić istniejące wiersze, więc EF wpisuje im <code>DEFAULT 0</code>. Potem <code>UpdateData</code> poprawia wiersze <strong>o identyfikatorach 1 i 2</strong> — bo tylko te zna z <code>HasData</code>. Zgłoszenia, które utworzyłeś sam curlem w lekcji 0009, zostają z <code>RequesterId = 0</code>. Za chwilę pojawia się klucz obcy, przy jego zakładaniu dane są przepisywane do nowej tabeli — i baza pyta: <em>gdzie jest zgłaszający o identyfikatorze 0?</em> Nigdzie.</p>
+<div class="callout">
+  <strong>Dobra wiadomość: nic się nie zepsuło.</strong> Cała migracja jechała w transakcji, więc odpadła w całości — w <code>__EFMigrationsHistory</code> dalej jest sam <code>InitialCreate</code>, tabela <code>Tickets</code> jest bez nowych kolumn, <code>ef_temp_Tickets</code> nie istnieje. Poprawiasz i puszczasz jeszcze raz. Wyjątkiem jest <code>PRAGMA foreign_keys = 0</code>, o którym EF ostrzega osobno (<em>„cannot be executed in a transaction”</em>) — to jedyny fragment poza transakcją.
+</div>
+<p>Rozwiązanie: <strong>domigrowanie danych</strong>. Wygenerowaną migrację wolno edytować — dopisz <code>Sql(...)</code> po <code>InsertData</code> ze zgłaszającymi (muszą już istnieć), a przed założeniem klucza obcego:</p>
+<pre><code>migrationBuilder.Sql(
+    """
+    UPDATE Tickets
+    SET RequesterId = 1
+    WHERE RequesterId = 0;
+    """);
+
+migrationBuilder.Sql(
+    """
+    UPDATE Tickets
+    SET Status = 'Open'
+    WHERE Status = '';
+    """);</code></pre>
+<p>Drugi <code>UPDATE</code> jest równie ważny, choć niczego nie wysadza. Domyślną wartością dla <code>Status</code> był pusty string — a <code>""</code> nie odpowiada żadnej wartości <code>TicketStatus</code>. Bez tej poprawki migracja przechodzi, aplikacja startuje, i dopiero pierwszy <code>GET /tickets</code> wywala się przy materializacji encji. Cicha awaria, odroczona o kilka minut.</p>
+<div class="callout warn">
+  <strong>To jest cała różnica między nauką a produkcją.</strong> Na pustej bazie ta migracja przechodzi bez mrugnięcia — wszystkie wiersze są z <code>HasData</code>, więc <code>UpdateData</code> ogarnia komplet. Prawdziwa baza ma dane, których autor migracji nie zna. Dlatego każde „dodaj wymaganą kolumnę / wymagany klucz obcy” to w istocie <strong>trzy kroki</strong>: dodaj kolumnę → uzupełnij dane → dopiero potem nałóż ograniczenie. Zespoły często rozbijają to nawet na osobne migracje, żeby dało się wdrażać etapami.
+</div>
+<p>Zostaje pytanie, na które kod nie odpowie: <em>czyje właściwie są osierocone zgłoszenia?</em> Tutaj wpisujemy <code>1</code>, bo to twoje własne dane testowe. W pracy odpowiedź brzmi zwykle „konto techniczne <code>system</code>/<code>migrated</code>” — i jest decyzją do uzgodnienia z kimś, kto zna dane, nie do zgadnięcia w locie.</p>
+
+<h2>Krok 6 — skoro baza pilnuje, po co sprawdzenie w handlerze?</h2>
+<p class="filename">Features/Tickets/Commands/CreateTicket/CreateTicketHandler.cs</p>
+<pre><code>var requesterId = await store.FindRequesterIdAsync(user.Name, cancellationToken)
+    ?? throw new DomainException(TicketErrors.UnknownRequester(user.Name));
+
+if (await store.UnresolvedTitleExistsAsync(requesterId, command.Title, cancellationToken))
+{
+    throw new DomainException(TicketErrors.DuplicateUnresolvedTitle(command.Title));
+}</code></pre>
+<p>Zapytanie w store czyta dokładnie to samo, co warunek indeksu — tylko w LINQ:</p>
+<pre><code>db.Tickets.AnyAsync(t =&gt;
+    t.RequesterId == requesterId &amp;&amp; t.Title == title &amp;&amp; t.Status != TicketStatus.Resolved, ct);</code></pre>
+<p>Ta sama reguła zapisana dwa razy to duplikacja — i to jest świadoma decyzja, bo każdy z tych zapisów robi coś innego:</p>
+<table>
+  <thead><tr><th></th><th>Sprawdzenie w handlerze</th><th>Indeks w bazie</th></tr></thead>
+  <tbody>
+    <tr><td>odpowiedź dla klienta</td><td><strong>409</strong> z czytelnym <code>detail</code></td><td><strong>500</strong> i stack trace w logu</td></tr>
+    <tr><td>wyścig dwóch równoległych żądań</td><td>przepuści oba — sprawdzenie i zapis to dwa kroki</td><td>zatrzyma drugi, zawsze</td></tr>
+    <tr><td>zapis z innego miejsca (skrypt, import, druga usługa)</td><td>nie obowiązuje</td><td>obowiązuje</td></tr>
+  </tbody>
+</table>
+<p>Handler daje <em>uprzejmość</em>, indeks daje <em>gwarancję</em>. Zostaw oba. Tak wygląda wyjście, gdy pominiesz handler i wjedziesz duplikatem prosto do bazy:</p>
+<pre><code>Microsoft.Data.Sqlite.SqliteException (0x80004005): SQLite Error 19:
+  'UNIQUE constraint failed: Tickets.RequesterId, Tickets.Title'</code></pre>
+<p>To samo z drugiej strony: spróbuj <em>odblokować</em> rozwiązane zgłoszenie, gdy ten sam zgłaszający ma już otwarte o tym samym tytule. Też dostaniesz błąd 19 — bo <code>UPDATE</code> wciąga wiersz z powrotem w zakres indeksu. Ograniczenie warunkowe pilnuje nie tylko wstawiania, ale każdej zmiany stanu.</p>
+
+<div class="task">
+  <h3>Zadanie</h3>
+  <ol>
+    <li><strong>Napisz indeks.</strong> W <code>Features/Tickets/TicketConfiguration.cs</code> czeka <code>// TODO(human)</code>. Twoje 3–4 linijki. Reszta pliku — relacja, konwersja statusu, seed — jest gotowa.</li>
+    <li><code>dotnet ef migrations add TicketRequester</code>, potem <code>dotnet ef migrations script InitialCreate TicketRequester</code>. Znajdź w SQL-u swój <code>WHERE</code> i tabelę <code>ef_temp_Tickets</code>.</li>
+    <li><code>dotnet ef database update</code>.</li>
+    <li>Przejdź scenariusz curlem — cztery żądania, cztery różne kody:
+      <pre><code>curl -i -X POST localhost:5006/tickets -H "Content-Type: application/json" \
+  -H "X-User: wojtek" -d '{"title":"Drukarka nie drukuje","priority":"normal"}'  <span class="cm"># 201</span>
+curl … -H "X-User: wojtek" -d '{"title":"Drukarka nie drukuje","priority":"high"}' <span class="cm"># 409</span>
+curl … -H "X-User: ania"   -d '{"title":"Drukarka nie drukuje","priority":"low"}'  <span class="cm"># 201</span>
+curl … -H "X-User: nikt"   -d '{"title":"Cokolwiek","priority":"low"}'            <span class="cm"># 404</span></code></pre>
+    </li>
+    <li><strong>Zwolnij parę.</strong> <code>POST /tickets/3/resolve</code>, a potem powtórz zgłoszenie wojtka o tym samym tytule. Teraz przechodzi — i w bazie leżą obok siebie dwa wiersze <code>(1, "Drukarka nie drukuje")</code>: jeden <code>Resolved</code>, jeden <code>Open</code>.</li>
+    <li><strong>Zobacz gołe ograniczenie.</strong> Zakomentuj w handlerze <code>if (await store.UnresolvedTitleExistsAsync(...))</code> i wyślij duplikat. 500 zamiast 409, w logu <code>SQLite Error 19</code>. Odkomentuj.</li>
+    <li><strong>Prześledź swój własny błąd.</strong> Jeśli <code>database update</code> wywalił się na <code>FOREIGN KEY constraint failed</code> — sprawdź, ile wierszy miało <code>RequesterId = 0</code> i dlaczego <code>UpdateData</code> ich nie objęło. Dopisz dwa <code>Sql(...)</code> z sekcji o <em>data migration</em>.</li>
+    <li><strong>Zepsuj celowo.</strong> Zmień w filtrze <code>"Status"</code> na <code>"Statuss"</code> i zrób nową migrację. Kiedy dokładnie wybucha — przy <code>migrations add</code> czy przy <code>database update</code>? Cofnij: <code>dotnet ef migrations remove</code>.</li>
+  </ol>
+  <div class="check">
+    <label><input type="checkbox" id="c1"> Umiem odróżnić foreign key property od navigation property i powiedzieć, czemu ta druga jest nullowalna</label>
+    <label><input type="checkbox" id="c2"> Wiem, czemu przy wymaganym FK trzeba świadomie wybrać <code>Restrict</code> zamiast domyślnej kaskady</label>
+    <label><input type="checkbox" id="c3"> Napisałem indeks złożony sam i wiem, co znaczy kolejność kolumn</label>
+    <label><input type="checkbox" id="c4"> Rozumiem, że <code>HasFilter</code> to surowy SQL — zależny od providera i niesprawdzany przez EF</label>
+    <label><input type="checkbox" id="c5"> Umiem wytłumaczyć, czemu <code>NULL</code> psuje unikalność złożoną i czemu na SQL Serverze jest inaczej</label>
+    <label><input type="checkbox" id="c6"> Widziałem <code>ef_temp_Tickets</code> w wygenerowanym SQL-u i wiem, skąd się bierze</label>
+    <label><input type="checkbox" id="c7"> Umiem uzasadnić, po co ta sama reguła stoi i w handlerze, i w bazie</label>
+    <label><input type="checkbox" id="c8"> Widziałem na własne oczy 409 z handlera i 500 z indeksu</label>
+    <label><input type="checkbox" id="c9"> Wiem, czemu dodanie wymaganego FK do niepustej tabeli wymaga domigrowania danych</label>
+  </div>
+</div>
+
+<h2>Quiz</h2>
+<div class="quiz" data-answer="2">
+  <div class="q">Indeks <code>(RequesterId, Title)</code> jest unikalny. Wstawiasz <code>(1, "Drukarka")</code>, potem <code>(2, "Drukarka")</code>. Co się dzieje?</div>
+  <button class="opt">Drugi wiersz odpada — tytuł powtórzony w tabeli</button>
+  <button class="opt">Drugi wiersz odpada — indeks bierze pierwszą kolumnę</button>
+  <button class="opt">Oba wiersze wchodzą — powtórzona musi być para</button>
+  <div class="why">Kluczem indeksu jest krotka. <code>(1, "Drukarka")</code> i <code>(2, "Drukarka")</code> to dwie różne wartości klucza. Zakaz dotyczy dopiero drugiego <code>(1, "Drukarka")</code>.</div>
+</div>
+<div class="quiz" data-answer="1">
+  <div class="q">Kolumna <code>AssigneeId</code> jest nullowalna i wchodzi w unikalny indeks. Dwa wiersze z <code>NULL</code> i tym samym tytułem — SQLite:</div>
+  <button class="opt">odrzuci drugi, bo puste wartości są równe</button>
+  <button class="opt">przyjmie oba, bo puste wartości są nieznane</button>
+  <button class="opt">odrzuci oba, bo klucz nie może być pusty</button>
+  <div class="why">Sprawdzone empirycznie na SQLite 3.50.4: oba wiersze wchodzą. <code>NULL</code> nie jest równy niczemu, także drugiemu <code>NULL</code>-owi. SQL Server robi odwrotnie — i dlatego EF dokłada tam filtr <code>IS NOT NULL</code>.</div>
+</div>
+<div class="quiz" data-answer="0">
+  <div class="q">Po co zostawiać sprawdzenie w handlerze, skoro indeks i tak nie przepuści duplikatu?</div>
+  <button class="opt">Bo handler zamienia konflikt w 409 zamiast w 500</button>
+  <button class="opt">Bo indeks działa dopiero po restarcie aplikacji</button>
+  <button class="opt">Bo indeks nie obejmuje zapisów robionych przez EF</button>
+  <div class="why">Indeks jest gwarancją i łapie też wyścigi oraz zapisy z innych miejsc, ale mówi wyjątkiem bazodanowym. Handler zna kontekst i produkuje sensowną odpowiedź HTTP. Dwie różne role, oba potrzebne.</div>
+</div>
+<div class="quiz" data-answer="1">
+  <div class="q">Wpisujesz w <code>HasFilter</code> nazwę kolumny z literówką. Kiedy się o tym dowiesz?</div>
+  <button class="opt">Przy kompilacji — fluent API sprawdza nazwy</button>
+  <button class="opt">Przy aplikowaniu migracji — to surowy SQL</button>
+  <button class="opt">Przy pierwszym zapisie łamiącym regułę</button>
+  <div class="why"><code>HasFilter</code> bierze string i wkleja go do <code>CREATE INDEX</code>. EF nie zagląda w środek. Kompilacja przechodzi, <code>migrations add</code> przechodzi, wywala się dopiero baza przy <code>database update</code>.</div>
+</div>
+
+<h2>Zapamiętaj bez zaglądania</h2>
+<details class="recall">
+  <summary>Czym różni się indeks złożony od dwóch osobnych indeksów?</summary>
+  <p>Złożony traktuje kolumny jako <strong>jeden klucz</strong>: unikalna musi być cała para, nie każda kolumna z osobna. Dwa osobne indeksy unikalne zabroniłyby dwóch zgłoszeń tego samego zgłaszającego <em>w ogóle</em> i dwóch o tym samym tytule <em>w ogóle</em>. Przy szukaniu złożony działa też po prefiksie — <code>(A, B)</code> pomaga zapytaniu po samym <code>A</code>, nie po samym <code>B</code>.</p>
+</details>
+<details class="recall">
+  <summary>Reguła zależna od stanu wiersza — czym ją wyrazić?</summary>
+  <p><code>HasFilter("…")</code> — indeks częściowy. Wiersze niespełniające warunku nie istnieją dla indeksu, więc zmiana stanu (rozwiązanie zgłoszenia) sama zwalnia parę. Warunek to surowy SQL: <code>"Status"</code> w SQLite i Postgresie, <code>[Status]</code> w SQL Serverze.</p>
+</details>
+<details class="recall">
+  <summary>Dwa wiersze z <code>NULL</code> w kolumnie objętej indeksem unikalnym — przejdą?</summary>
+  <p>W SQLite i Postgresie tak (<code>NULL</code> ≠ <code>NULL</code>). W SQL Serverze nie — dlatego provider SQL Servera w EF sam dokłada filtr <code>IS NOT NULL</code> dla nullowalnych kolumn indeksu unikalnego. Ten sam kod C#, inna reguła w bazie.</p>
+</details>
+<details class="recall">
+  <summary>Po co sprawdzenie w handlerze, skoro indeks i tak nie przepuści?</summary>
+  <p>Handler daje 409 z komunikatem, indeks daje 500. Ale handler przepuści wyścig dwóch równoległych żądań i nie obowiązuje zapisów z innych miejsc. Uprzejmość w kodzie, gwarancja w bazie — potrzebne oba.</p>
+</details>
+<details class="recall">
+  <summary>Dlaczego <code>enum</code> zapisujemy jako tekst, a nie liczbę?</summary>
+  <p><code>HasConversion&lt;string&gt;()</code>. Warunek indeksu jest surowym SQL-em: <code>&lt;&gt; 'Resolved'</code> przeżyje dopisanie nowej wartości do <code>enum</code>-a, <code>&lt;&gt; 2</code> zacznie po cichu znaczyć co innego, gdy ktoś wstawi wartość w środek.</p>
+</details>
+<details class="recall">
+  <summary>Dodajesz wymagany klucz obcy do tabeli, w której już są dane. Co musi się stać po drodze?</summary>
+  <p>Trzy kroki, nie jeden: dodaj kolumnę (z wartością domyślną), <strong>uzupełnij istniejące wiersze</strong> własnym <code>migrationBuilder.Sql("UPDATE …")</code>, dopiero potem nałóż klucz obcy. Bez środkowego kroku wiersze zostają z <code>0</code> i migracja pada na <code>FOREIGN KEY constraint failed</code>. <code>UpdateData</code> wygenerowane przez EF poprawia wyłącznie wiersze z <code>HasData</code>.</p>
+</details>
+<details class="recall">
+  <summary><code>WithMany()</code> bez argumentu — co to znaczy?</summary>
+  <p>Że po drugiej stronie relacji jest „wiele”, ale kolekcji w encji nadrzędnej nie modelujemy. Relacja w bazie wychodzi identyczna; różnica jest tylko w tym, czy z kodu da się przejść z <code>Requester</code> do jego zgłoszeń.</p>
+</details>
+
+<h2>Źródło pierwotne</h2>
+<div class="callout source">
+  <a href="https://learn.microsoft.com/ef/core/modeling/indexes">EF Core — Indexes</a> (ok. 10 min; sekcje <em>Composite index</em>, <em>Index uniqueness</em>, <em>Index filter</em>), a potem <a href="https://learn.microsoft.com/ef/core/modeling/relationships/one-to-many">One-to-many relationships</a> — najgęstsza strona o <code>HasOne</code>/<code>WithMany</code>/<code>HasForeignKey</code>. Dla tła o kaskadach: <a href="https://learn.microsoft.com/ef/core/saving/cascade-delete">Cascade delete</a>.
+</div>
+<div class="callout ask">
+  Pytaj, jeśli coś nie klika. Do sprawdzenia w firmowym repo: czy któryś unikalny indeks stoi na kolumnie nullowalnej (i czy autor o tym wiedział)? Czy relacje mają jawne <code>OnDelete</code>, czy jadą na domyślnej kaskadzie? I czy reguły biznesowe są tam pilnowane tylko w handlerach, czy również w schemacie bazy?
+</div>
+
+<nav class="lesson-nav">
+  <a href="0010-mediatr.html">← 0010 · MediatR</a> · <a href="../reference/relacje-i-indeksy.html">ściąga: relacje i indeksy</a> · <a href="../reference/glossary.html">glosariusz</a>
+</nav>
+</div>
+</body>
+</html>

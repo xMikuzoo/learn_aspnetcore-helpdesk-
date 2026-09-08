@@ -8,12 +8,15 @@ public class CreateTicketHandler(ITicketStore store, TicketMetrics metrics, ICur
 {
     public async Task<TicketDto> Handle(CreateTicketCommand command, CancellationToken cancellationToken)
     {
-        if (await store.TitleExistsAsync(command.Title, cancellationToken))
+        var requesterId = await store.FindRequesterIdAsync(user.Name, cancellationToken)
+            ?? throw new DomainException(TicketErrors.UnknownRequester(user.Name));
+
+        if (await store.UnresolvedTitleExistsAsync(requesterId, command.Title, cancellationToken))
         {
-            throw new DomainException(TicketErrors.DuplicateTitle(command.Title));
+            throw new DomainException(TicketErrors.DuplicateUnresolvedTitle(command.Title));
         }
 
-        var ticket = await store.AddAsync(command.Title, command.Priority, cancellationToken);
+        var ticket = await store.AddAsync(command.Title, command.Priority, requesterId, cancellationToken);
         metrics.RecordCreated(user);
 
         return TicketDto.From(ticket);

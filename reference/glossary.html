@@ -237,6 +237,24 @@
 
   <dt>__EFMigrationsHistory</dt>
   <dd>Tabela w bazie z listą zaaplikowanych migracji. Źródło prawdy o tym, czy schemat jest aktualny — samo istnienie pliku <code>.db</code> nic nie znaczy (SQLite tworzy pusty plik przy pierwszym połączeniu). Lekcja 0009.</dd>
+
+  <dt>Foreign key property <span class="pl">— właściwość klucza obcego</span></dt>
+  <dd>Zwykła właściwość odwzorowana na kolumnę FK (<code>RequesterId</code>). Po niej filtrujesz i ją ustawiasz przy zapisie, bez dociągania drugiej encji. Typ <code>int</code> = relacja wymagana, <code>int?</code> = opcjonalna. Lekcja 0011.</dd>
+
+  <dt>Navigation property <span class="pl">— właściwość nawigacyjna</span></dt>
+  <dd>Odwołanie do encji po drugiej stronie relacji (<code>Requester? Requester</code>). Bez <code>Include</code> jest <code>null</code> — dlatego deklaruje się ją jako nullowalną. Nullowalność nawigacji nie mówi nic o tym, czy kolumna w bazie może być pusta. Lekcja 0011.</dd>
+
+  <dt>Composite index <span class="pl">— indeks złożony</span></dt>
+  <dd><code>HasIndex(t =&gt; new { t.RequesterId, t.Title })</code>. Kolumny tworzą jeden klucz: przy <code>IsUnique()</code> duplikatem jest powtórzenie <em>całej</em> pary. Przyspiesza też wyszukiwanie po prefiksie (po pierwszej kolumnie), nie po dowolnej. Lekcja 0011.</dd>
+
+  <dt>Filtered index <span class="pl">— indeks częściowy/warunkowy</span></dt>
+  <dd><code>HasFilter("…")</code> — surowy SQL doklejany jako <code>WHERE</code> do <code>CREATE INDEX</code>. Wiersze spoza warunku nie istnieją dla indeksu, więc ograniczenie zależy od <em>stanu</em> wiersza. EF tego stringa nie sprawdza; składnia zależy od providera. Lekcja 0011.</dd>
+
+  <dt>DeleteBehavior <span class="pl">— zachowanie przy usuwaniu</span></dt>
+  <dd><code>OnDelete(DeleteBehavior.Restrict)</code> — baza odmawia usunięcia rodzica z dziećmi; <code>Cascade</code> — kasuje dzieci (domyślne przy wymaganym FK); <code>SetNull</code> — zeruje FK dziecka. Przy danych historycznych wybieraj <code>Restrict</code> świadomie. Lekcja 0011.</dd>
+
+  <dt>Value converter <span class="pl">— konwerter wartości</span></dt>
+  <dd><code>HasConversion&lt;string&gt;()</code> — mapowanie typu z kodu na inny typ kolumny. Dla <code>enum</code>-a: tekst zamiast liczby, dzięki czemu dane są czytelne, a warunki SQL nie zmieniają znaczenia po dopisaniu wartości do <code>enum</code>-a. Lekcja 0011.</dd>
 </dl>
 
 <h2>Struktura projektu</h2>
